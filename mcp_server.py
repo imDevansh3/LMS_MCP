@@ -3050,4 +3050,5 @@ if __name__ == "__main__":
         log.info("Available routes: %s", [str(r.path) for r in app.routes])
     except Exception:
         pass
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # forwarded_allow_ips="*" allows Kubernetes service mesh forwarded headers
+    uvicorn.run(app, host="0.0.0.0", port=port, forwarded_allow_ips="*")
