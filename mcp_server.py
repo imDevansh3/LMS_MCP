@@ -3043,19 +3043,14 @@ def complete_viva(user_id: str, session_id: str, result: str, summary: str) -> s
 
 if __name__ == "__main__":
     import uvicorn
-    from starlette.middleware.trustedhost import TrustedHostMiddleware
     
     port = int(os.getenv("MCP_PORT", "8001"))
     log.info("Starting Neulearn MCP Server on port %s", port)
     app = mcp.sse_app()
-    
-    # Add TrustedHostMiddleware to accept all hosts (Kubernetes service mesh DNS names)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
     
     try:
         log.info("Available routes: %s", [str(r.path) for r in app.routes])
     except Exception:
         pass
     
-    # Double protection: forwarded_allow_ips + TrustedHostMiddleware for Kubernetes
     uvicorn.run(app, host="0.0.0.0", port=port, forwarded_allow_ips="*")
