@@ -26,5 +26,5 @@ EXPOSE ${MCP_PORT}
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD python -c "import socket; s=socket.socket(); s.settimeout(5); s.connect(('localhost', int('${MCP_PORT:-8001}'))) or exit(1)" || exit 1
 
-# Run the MCP server
-CMD ["python", "mcp_server.py"]
+# Run the MCP server with unbuffered output (-u flag for immediate logging in Kubernetes)
+CMD ["python", "-u", "mcp_server.py"]
