@@ -2358,6 +2358,686 @@ def get_mentor_personalization(user_id: str) -> str:
 
 
 # =============================================================================
+# MENTOR CHATBOT TOOLS — Runtime conversation support
+# =============================================================================
+
+@mcp.tool()
+def get_semantic_profile_slice(user_id: str, course_id: str = None) -> str:
+    """
+    Get learner's long-term profile for mentor personalization.
+    Returns mentor_context, performance_profile, known_struggles, known_strengths.
+    Call at START of each new mentor session.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT profile FROM semantic_profile_versions
+                WHERE user_id = %s AND is_current = true
+                LIMIT 1
+            """, (user_id,))
+            row = cur.fetchone()
+            
+            if not row:
+                return json.dumps({
+                    "user_id": user_id,
+                    "mentor_context": {"preferred_explanation_style": "adaptive"},
+                    "performance_profile": {},
+                    "known_struggles": [],
+                    "known_strengths": []
+                })
+            
+            profile = row["profile"]
+            struggles = profile.get("known_struggles", [])
+            strengths = profile.get("known_strengths", [])
+            
+            # Filter by course if provided
+            if course_id:
+                struggles = [s for s in struggles if s.get("course_id") == course_id]
+                strengths = [s for s in strengths if s.get("course_id") == course_id]
+            
+            return json.dumps({
+                "user_id": user_id,
+                "mentor_context": profile.get("mentor_context", {}),
+                "performance_profile": profile.get("performance_profile", {}),
+                "known_struggles": struggles,
+                "known_strengths": strengths
+            })
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def get_skill_mastery(user_id: str, course_id: str = None) -> str:
+    """
+    Get learner's current skill mastery levels with time decay.
+    Returns effective_score (0.0-1.0) and confidence for each skill.
+    Call at START of each mentor session.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT profile FROM semantic_profile_versions
+                WHERE user_id = %s AND is_current = true
+                LIMIT 1
+            """, (user_id,))
+            row = cur.fetchone()
+            
+            if not row:
+                return json.dumps({"user_id": user_id, "skills": []})
+            
+            profile = row["profile"]
+            skills = profile.get("skill_mastery", [])
+            
+            # Filter by course if provided
+            if course_id:
+                skills = [s for s in skills if s.get("course_id") == course_id]
+            
+            return json.dumps({
+                "user_id": user_id,
+                "course_id": course_id,
+                "skills": skills
+            })
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def get_lesson_content(lesson_id: str) -> str:
+    """
+    Fetch full lesson content by ID.
+    Call at START of mentor session so you can reference lesson material.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT * FROM lessons WHERE lesson_id = %s
+            """, (lesson_id,))
+            lesson = cur.fetchone()
+            
+            if not lesson:
+                return json.dumps({
+                    "success": False,
+                    "error": f"Lesson {lesson_id} not found"
+                })
+            
+            return json.dumps({
+                "success": True,
+                "lesson_id": lesson["lesson_id"],
+                "title": lesson.get("title"),
+                "content": lesson.get("content"),
+                "summary": lesson.get("summary"),
+                "topics": lesson.get("topics", [])
+            })
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def get_agent_decisions(user_id: str, agent_type: str = None, limit: int = 10) -> str:
+    """
+    Get audit log of platform agent decisions for this learner.
+    Call ONLY when learner asks WHY a decision was made.
+    agent_type: pathway_agent, semantic_rebuild_agent, code_review_agent, etc.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if agent_type:
+                cur.execute("""
+                    SELECT * FROM agent_decisions
+                    WHERE user_id = %s AND agent_type = %s
+                    ORDER BY timestamp DESC
+                    LIMIT %s
+                """, (user_id, agent_type, limit))
+            else:
+                cur.execute("""
+                    SELECT * FROM agent_decisions
+                    WHERE user_id = %s
+                    ORDER BY timestamp DESC
+                    LIMIT %s
+                """, (user_id, limit))
+            
+            decisions = cur.fetchall()
+            
+            return json.dumps({
+                "user_id": user_id,
+                "agent_type": agent_type,
+                "decisions": [dict(d) for d in decisions]
+            }, default=str)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def persist_conversation_message(
+    conversation_id: str,
+    session_id: str,
+    user_id: str,
+    role: str,
+    message: str
+) -> str:
+    """
+    Save a single message to conversation log immediately.
+    Call TWICE per turn: once for learner's message (role='user'),
+    once for your response (role='mentor').
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            message_id = str(uuid.uuid4())
+            cur.execute("""
+                INSERT INTO raw_mentor_chat_turns 
+                (id, user_id, session_id, conversation_id, role, message, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            """, (message_id, user_id, session_id, conversation_id, role, message))
+            conn.commit()
+            
+            return json.dumps({
+                "status": "persisted",
+                "message_id": message_id,
+                "role": role
+            })
+    except Exception as e:
+        conn.rollback()
+        return json.dumps({"status": "error", "error": str(e)})
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def get_raw_session_transcript(session_id: str) -> str:
+    """
+    Get complete User:/Mentor: transcript for a finished session.
+    FOR EPISODIC EXTRACTION AGENT USE ONLY - not for mentor chatbot.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT role, message, created_at
+                FROM raw_mentor_chat_turns
+                WHERE session_id = %s
+                ORDER BY created_at
+            """, (session_id,))
+            turns = cur.fetchall()
+            
+            if not turns:
+                return json.dumps({
+                    "session_id": session_id,
+                    "transcript": "",
+                    "line_count": 0
+                })
+            
+            lines = []
+            for turn in turns:
+                role_label = "User" if turn["role"] == "user" else "Mentor"
+                lines.append(f"{role_label}: {turn['message']}")
+            
+            transcript = "\n".join(lines)
+            
+            return json.dumps({
+                "session_id": session_id,
+                "transcript": transcript,
+                "line_count": len(lines)
+            })
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def get_current_course(user_id: str) -> str:
+    """
+    Get the course the learner is currently studying.
+    Returns course_id, title, current_lesson_id.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT sp.course_id, c.title, sp.current_lesson_id
+                FROM student_pathways sp
+                JOIN courses c ON sp.course_id = c.course_id
+                WHERE sp.user_id = %s AND sp.status = 'in_progress'
+                ORDER BY sp.started_at DESC
+                LIMIT 1
+            """, (user_id,))
+            course = cur.fetchone()
+            
+            if not course:
+                return json.dumps({
+                    "success": False,
+                    "error": "No active course found"
+                })
+            
+            return json.dumps({
+                "success": True,
+                "course_id": course["course_id"],
+                "title": course["title"],
+                "current_lesson_id": course["current_lesson_id"]
+            })
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def get_recent_exercises(user_id: str, course_id: str = None, limit: int = 5) -> str:
+    """
+    Get learner's recent exercise attempts with scores.
+    Use to understand what they've been practicing recently.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if course_id:
+                cur.execute("""
+                    SELECT * FROM exercise_attempts
+                    WHERE user_id = %s AND course_id = %s
+                    ORDER BY attempted_at DESC
+                    LIMIT %s
+                """, (user_id, course_id, limit))
+            else:
+                cur.execute("""
+                    SELECT * FROM exercise_attempts
+                    WHERE user_id = %s
+                    ORDER BY attempted_at DESC
+                    LIMIT %s
+                """, (user_id, limit))
+            
+            exercises = cur.fetchall()
+            
+            return json.dumps({
+                "user_id": user_id,
+                "course_id": course_id,
+                "exercises": [dict(e) for e in exercises]
+            }, default=str)
+    finally:
+        conn.close()
+
+
+# =============================================================================
+# VIVA AGENT TOOLS — Runtime viva examination support
+# =============================================================================
+
+@mcp.tool()
+def get_capstone_details(user_id: str) -> str:
+    """
+    Get mega capstone requirements, description, and context.
+    Use to understand what the user was supposed to build.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT c.* FROM capstones c
+                JOIN student_pathways sp ON c.capstone_id = sp.capstone_id
+                WHERE sp.user_id = %s AND sp.status = 'completed'
+                AND (c.capstone_id LIKE '%%mega%%' OR c.title ILIKE '%%mega%%')
+                ORDER BY c.created_at DESC
+                LIMIT 1
+            """, (user_id,))
+            capstone = cur.fetchone()
+            
+            if not capstone:
+                cur.execute("""
+                    SELECT * FROM capstones 
+                    WHERE capstone_id LIKE '%%mega%%' OR title ILIKE '%%mega%%'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """)
+                capstone = cur.fetchone()
+            
+            if not capstone:
+                return json.dumps({
+                    "success": False,
+                    "error": "No mega capstone found"
+                })
+            
+            return json.dumps({
+                "success": True,
+                "capstone_id": capstone["capstone_id"],
+                "title": capstone["title"],
+                "description": capstone["description"],
+                "passing_score": capstone.get("passing_score")
+            }, default=str)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def get_capstone_review(user_id: str, capstone_id: str = None) -> str:
+    """
+    Get code review results for mega capstone submission.
+    Includes code quality, design patterns, strengths, weaknesses.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if not capstone_id:
+                cur.execute("""
+                    SELECT capstone_id FROM capstones 
+                    WHERE capstone_id LIKE '%%mega%%' OR title ILIKE '%%mega%%'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """)
+                row = cur.fetchone()
+                if not row:
+                    return json.dumps({"success": False, "error": "No mega capstone found"})
+                capstone_id = row["capstone_id"]
+            
+            cur.execute("""
+                SELECT * FROM episodic_episodes
+                WHERE user_id = %s AND type = 'CAPSTONE_CODE_REVIEW'
+                AND data->>'capstone_id' = %s
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (user_id, capstone_id))
+            review = cur.fetchone()
+            
+            if not review:
+                return json.dumps({
+                    "success": False,
+                    "error": f"No code review found for capstone {capstone_id}"
+                })
+            
+            data = review["data"]
+            if isinstance(data, str):
+                data = json.loads(data)
+            
+            return json.dumps({
+                "success": True,
+                "episode_id": review["episode_id"],
+                "capstone_id": capstone_id,
+                "timestamp": review["timestamp"].isoformat() if hasattr(review["timestamp"], "isoformat") else str(review["timestamp"]),
+                "review": data
+            }, default=str)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def get_capstone_test(user_id: str, capstone_id: str = None) -> str:
+    """
+    Get test results for mega capstone submission.
+    Includes pass/fail status, individual test cases, failures.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if not capstone_id:
+                cur.execute("""
+                    SELECT capstone_id FROM capstones 
+                    WHERE capstone_id LIKE '%%mega%%' OR title ILIKE '%%mega%%'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """)
+                row = cur.fetchone()
+                if not row:
+                    return json.dumps({"success": False, "error": "No mega capstone found"})
+                capstone_id = row["capstone_id"]
+            
+            cur.execute("""
+                SELECT * FROM episodic_episodes
+                WHERE user_id = %s AND type = 'CAPSTONE_TEST_RUN'
+                AND data->>'capstone_id' = %s
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (user_id, capstone_id))
+            test_results = cur.fetchone()
+            
+            if not test_results:
+                return json.dumps({
+                    "success": False,
+                    "error": f"No test results found for capstone {capstone_id}"
+                })
+            
+            data = test_results["data"]
+            if isinstance(data, str):
+                data = json.loads(data)
+            
+            return json.dumps({
+                "success": True,
+                "episode_id": test_results["episode_id"],
+                "capstone_id": capstone_id,
+                "timestamp": test_results["timestamp"].isoformat() if hasattr(test_results["timestamp"], "isoformat") else str(test_results["timestamp"]),
+                "test_results": data
+            }, default=str)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def start_viva(user_id: str, capstone_id: str) -> str:
+    """
+    Start new viva session for a user.
+    Must be called before recording questions and responses.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
+            if not cur.fetchone():
+                return json.dumps({"success": False, "error": f"User {user_id} not found"})
+            
+            cur.execute("SELECT * FROM capstones WHERE capstone_id = %s", (capstone_id,))
+            if not cur.fetchone():
+                return json.dumps({"success": False, "error": f"Capstone {capstone_id} not found"})
+            
+            session_id = f"viva-{uuid.uuid4().hex[:12]}"
+            cur.execute("""
+                INSERT INTO viva_sessions (session_id, user_id, capstone_id, status, total_questions, questions_asked)
+                VALUES (%s, %s, %s, 'in_progress', 6, 0)
+                RETURNING *
+            """, (session_id, user_id, capstone_id))
+            session = cur.fetchone()
+            conn.commit()
+            
+            return json.dumps({
+                "success": True,
+                "session_id": session["session_id"],
+                "user_id": user_id,
+                "capstone_id": capstone_id,
+                "status": session["status"],
+                "total_questions": session["total_questions"]
+            }, default=str)
+    except Exception as e:
+        conn.rollback()
+        return json.dumps({"success": False, "error": str(e)})
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def get_viva_session(user_id: str, session_id: str) -> str:
+    """
+    Get current state of viva session including all questions and responses.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM viva_sessions WHERE session_id = %s", (session_id,))
+            session = cur.fetchone()
+            
+            if not session:
+                return json.dumps({"success": False, "error": f"Session {session_id} not found"})
+            
+            cur.execute("""
+                SELECT * FROM viva_questions 
+                WHERE session_id = %s 
+                ORDER BY question_number
+            """, (session_id,))
+            questions = cur.fetchall()
+            
+            cur.execute("""
+                SELECT * FROM viva_responses 
+                WHERE session_id = %s
+            """, (session_id,))
+            responses = cur.fetchall()
+            
+            return json.dumps({
+                "success": True,
+                "session_id": session["session_id"],
+                "user_id": session["user_id"],
+                "capstone_id": session["capstone_id"],
+                "status": session["status"],
+                "total_questions": session["total_questions"],
+                "questions_asked": session["questions_asked"],
+                "questions": [dict(q) for q in questions],
+                "responses": [dict(r) for r in responses]
+            }, default=str)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def record_viva_question(
+    user_id: str,
+    session_id: str,
+    question_text: str,
+    question_type: str,
+    context_source: str
+) -> str:
+    """
+    Record a question being asked during viva.
+    Call BEFORE asking the user the question.
+    question_type: concept, code_specific, edge_case, debugging
+    context_source: code_review, test_failure, etc.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM viva_sessions WHERE session_id = %s", (session_id,))
+            session = cur.fetchone()
+            
+            if not session:
+                return json.dumps({"success": False, "error": f"Session {session_id} not found"})
+            
+            question_number = session["questions_asked"] + 1
+            
+            cur.execute("""
+                INSERT INTO viva_questions (session_id, question_number, question_text, topic, difficulty)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING *
+            """, (session_id, question_number, question_text, context_source, question_type))
+            question = cur.fetchone()
+            
+            cur.execute("""
+                UPDATE viva_sessions SET questions_asked = %s WHERE session_id = %s
+            """, (question_number, session_id))
+            conn.commit()
+            
+            return json.dumps({
+                "success": True,
+                "question_id": question["question_id"],
+                "question_number": question_number,
+                "question_text": question_text
+            }, default=str)
+    except Exception as e:
+        conn.rollback()
+        return json.dumps({"success": False, "error": str(e)})
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def record_viva_response(
+    user_id: str,
+    session_id: str,
+    question_id: str,
+    response_text: str,
+    understanding_signals: str = None
+) -> str:
+    """
+    Record user's response to a viva question.
+    Call AFTER the user answers.
+    understanding_signals: JSON string with evaluation data
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                INSERT INTO viva_responses (session_id, question_id, response_text, evaluation)
+                VALUES (%s, %s, %s, %s)
+                RETURNING *
+            """, (session_id, question_id, response_text, understanding_signals))
+            response = cur.fetchone()
+            conn.commit()
+            
+            return json.dumps({
+                "success": True,
+                "response_id": response["response_id"],
+                "question_id": question_id
+            }, default=str)
+    except Exception as e:
+        conn.rollback()
+        return json.dumps({"success": False, "error": str(e)})
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def complete_viva(user_id: str, session_id: str, result: str, summary: str) -> str:
+    """
+    Complete viva session with final pass/fail result and summary.
+    result: 'pass' or 'fail'
+    summary: Summary of viva and reasoning for decision
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM viva_sessions WHERE session_id = %s", (session_id,))
+            session_before = cur.fetchone()
+            
+            if not session_before:
+                return json.dumps({"success": False, "error": f"Session {session_id} not found"})
+            
+            cur.execute("""
+                UPDATE viva_sessions
+                SET status = 'completed', ended_at = NOW()
+                WHERE session_id = %s
+                RETURNING *
+            """, (session_id,))
+            session = cur.fetchone()
+            conn.commit()
+            
+            started = session_before["started_at"]
+            ended = session["ended_at"]
+            duration_minutes = int((ended - started).total_seconds() / 60) if started and ended else 0
+            
+            cur.execute("""
+                INSERT INTO episodic_episodes (user_id, type, schema_version, data)
+                VALUES (%s, 'CAPSTONE_VIVA', 1, %s)
+                RETURNING episode_id
+            """, (user_id, json.dumps({
+                "session_id": session_id,
+                "capstone_id": session["capstone_id"],
+                "result": result,
+                "summary": summary,
+                "total_questions": session["total_questions"],
+                "questions_asked": session["questions_asked"],
+                "duration_minutes": duration_minutes
+            })))
+            episode = cur.fetchone()
+            conn.commit()
+            
+            return json.dumps({
+                "success": True,
+                "session_id": session_id,
+                "episode_id": episode["episode_id"],
+                "status": "completed",
+                "result": result,
+                "duration_minutes": duration_minutes
+            }, default=str)
+    except Exception as e:
+        conn.rollback()
+        return json.dumps({"success": False, "error": str(e)})
+    finally:
+        conn.close()
+
+
+# =============================================================================
 # Run
 # =============================================================================
 
