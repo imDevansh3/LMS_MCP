@@ -1,0 +1,11 @@
+# Neulearn — Episodic Agent
+langgraph>=0.2.0
+langchain>=0.2.0
+langchain-openai>=0.1.0
+langchain-core>=0.2.0
+langchain-mcp-adapters>=0.1.0
+mcp[cli]>=1.0.0
+fastmcp>=0.1.0
+psycopg2-binary>=2.9.0
+python-dotenv>=1.0.0
+uvicorn>=0.29.0
