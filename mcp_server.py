@@ -2978,6 +2978,57 @@ def record_viva_response(
 
 
 @mcp.tool()
+def record_viva_turn(
+    user_id: str,
+    session_id: str,
+    capstone_id: str,
+    attempt_id: str,
+    turn_number: int,
+    role: str,
+    message: str,
+    pathway_id: str = None,
+    episode_id: str = None
+) -> str:
+    """
+    Record a conversation turn during the viva examination.
+    Call this for EVERY message exchanged - both examiner questions and learner responses.
+    
+    role: 'examiner' for your questions/statements, 'learner' for the student's responses
+    turn_number: sequential turn number starting from 1
+    message: the full text of the message
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                INSERT INTO viva_conversation_turns
+                (user_id, session_id, capstone_id, pathway_id, attempt_id, turn_number, role, message, episode_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, created_at
+            """, (user_id, session_id, capstone_id, pathway_id, attempt_id, turn_number, role, message, episode_id))
+            turn = cur.fetchone()
+            conn.commit()
+            
+            return json.dumps({
+                "success": True,
+                "turn_id": turn["id"],
+                "user_id": user_id,
+                "session_id": session_id,
+                "capstone_id": capstone_id,
+                "attempt_id": attempt_id,
+                "turn_number": turn_number,
+                "role": role,
+                "message": message,
+                "created_at": turn["created_at"].isoformat() if turn["created_at"] else None
+            }, default=str)
+    except Exception as e:
+        conn.rollback()
+        return json.dumps({"success": False, "error": str(e)})
+    finally:
+        conn.close()
+
+
+@mcp.tool()
 def complete_viva(user_id: str, session_id: str, result: str, summary: str) -> str:
     """
     Complete viva session with final pass/fail result and summary.
