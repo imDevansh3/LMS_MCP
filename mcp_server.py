@@ -26,6 +26,7 @@ def get_conn():
 
 @mcp.tool()
 def fetch_raw_self_assessment(user_id: str, session_id: str) -> str:
+    log.info(f"Fetching raw self-assessment for user={user_id}, session={session_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -40,9 +41,11 @@ def fetch_raw_self_assessment(user_id: str, session_id: str) -> str:
             """, (user_id, session_id))
             row = cur.fetchone()
             if not row:
+                log.debug(f"No unprocessed self-assessment found for user={user_id}, session={session_id}")
                 return json.dumps({})
             result = dict(row)
             result["created_at"] = result["created_at"].isoformat()
+            log.info(f"Successfully fetched self-assessment for user={user_id}")
             return json.dumps(result)
     finally:
         conn.close()
@@ -50,6 +53,7 @@ def fetch_raw_self_assessment(user_id: str, session_id: str) -> str:
 
 @mcp.tool()
 def fetch_raw_pre_assessment(user_id: str, session_id: str) -> str:
+    log.info(f"Fetching raw pre-assessment for user={user_id}, session={session_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -65,6 +69,7 @@ def fetch_raw_pre_assessment(user_id: str, session_id: str) -> str:
             """, (user_id, session_id))
             rows = cur.fetchall()
             if not rows:
+                log.debug(f"No unprocessed pre-assessment found for user={user_id}, session={session_id}")
                 return json.dumps({})
             result = {"user_id": user_id, "session_id": session_id,
                       "domains": {}, "row_ids": []}
@@ -108,6 +113,7 @@ def fetch_self_assessment_ratings(user_id: str, session_id: str) -> str:
 
 @mcp.tool()
 def compute_pre_assessment_scores(user_id: str, session_id: str) -> str:
+    log.info(f"Computing pre-assessment scores for user={user_id}, session={session_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -216,9 +222,11 @@ def compute_pre_assessment_scores(user_id: str, session_id: str) -> str:
 
 @mcp.tool()
 def compute_self_assessment_ratings(self_assessment_json: str) -> str:
+    log.info("Computing self-assessment ratings")
     try:
         self_assessment = json.loads(self_assessment_json)
     except Exception as e:
+        log.error(f"Invalid JSON in compute_self_assessment_ratings: {e}")
         return json.dumps({"status": "error", "detail": f"Invalid JSON: {e}"})
 
     if not isinstance(self_assessment, dict):
@@ -260,11 +268,13 @@ def compute_self_assessment_ratings(self_assessment_json: str) -> str:
         else:
             ratings[domain] = "intermediate"
 
+    log.info(f"Successfully computed ratings for {len(ratings)} domains")
     return json.dumps(ratings)
 
 
 @mcp.tool()
 def write_episode(user_id: str, episode_type: str, schema_version: int, data_json: str) -> str:
+    log.info(f"Writing episode type={episode_type} for user={user_id}, schema_version={schema_version}")
     conn = get_conn()
     try:
         valid_types = [
@@ -326,9 +336,11 @@ def write_episode(user_id: str, episode_type: str, schema_version: int, data_jso
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (ep_id, user_id, episode_type, schema_version, ts, json.dumps(data)))
         conn.commit()
+        log.info(f"Successfully wrote episode type={episode_type}, episode_id={ep_id} for user={user_id}")
         return json.dumps({"episode_id": ep_id, "status": "ok"})
     except Exception as e:
         conn.rollback()
+        log.error(f"write_episode error for user={user_id}, type={episode_type}: {e}")
         return json.dumps({"status": "error", "detail": str(e)})
     finally:
         conn.close()
@@ -337,6 +349,7 @@ def write_episode(user_id: str, episode_type: str, schema_version: int, data_jso
 @mcp.tool()
 def write_pre_assessment_episode(user_id: str, mcq_scores_json: str,
                                   overall_entry_level_json: str, calibration_delta_json: str) -> str:
+    log.info(f"Writing pre-assessment episode for user={user_id}")
     conn = get_conn()
     try:
         try:
@@ -346,6 +359,7 @@ def write_pre_assessment_episode(user_id: str, mcq_scores_json: str,
                 "calibration_delta":   json.loads(calibration_delta_json),
             }
         except Exception as e:
+            log.error(f"Invalid JSON in write_pre_assessment_episode for user={user_id}: {e}")
             return json.dumps({"status": "error", "detail": f"Invalid JSON arg: {e}"})
 
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -374,9 +388,11 @@ def write_pre_assessment_episode(user_id: str, mcq_scores_json: str,
                 VALUES (%s, %s, 'PRE_ASSESSMENT', 1, %s, %s)
             """, (ep_id, user_id, ts, json.dumps(data)))
         conn.commit()
+        log.info(f"Successfully wrote pre-assessment episode_id={ep_id} for user={user_id}")
         return json.dumps({"episode_id": ep_id, "status": "ok"})
     except Exception as e:
         conn.rollback()
+        log.error(f"write_pre_assessment_episode error for user={user_id}: {e}")
         return json.dumps({"status": "error", "detail": str(e)})
     finally:
         conn.close()
@@ -384,6 +400,7 @@ def write_pre_assessment_episode(user_id: str, mcq_scores_json: str,
 
 @mcp.tool()
 def mark_self_assessment_processed(user_id: str, session_id: str, episode_id: str) -> str:
+    log.info(f"Marking self-assessment processed: user={user_id}, session={session_id}, episode={episode_id}")
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -395,9 +412,11 @@ def mark_self_assessment_processed(user_id: str, session_id: str, episode_id: st
                   AND  processed_at IS NULL
             """, (episode_id, user_id, session_id))
         conn.commit()
+        log.info(f"Successfully marked self-assessment processed for user={user_id}")
         return "ok"
     except Exception as e:
         conn.rollback()
+        log.error(f"mark_self_assessment_processed error: {e}")
         return f"error: {e}"
     finally:
         conn.close()
@@ -405,9 +424,11 @@ def mark_self_assessment_processed(user_id: str, session_id: str, episode_id: st
 
 @mcp.tool()
 def mark_pre_assessment_processed(row_ids_json: str, episode_id: str) -> str:
+    log.info(f"Marking pre-assessment processed: episode={episode_id}")
     conn = get_conn()
     try:
         row_ids = json.loads(row_ids_json)
+        log.debug(f"Processing {len(row_ids)} pre-assessment rows")
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE raw_pre_assessment
@@ -415,9 +436,11 @@ def mark_pre_assessment_processed(row_ids_json: str, episode_id: str) -> str:
                 WHERE  id = ANY(%s) AND processed_at IS NULL
             """, (episode_id, row_ids))
         conn.commit()
+        log.info(f"Successfully marked {len(row_ids)} pre-assessment rows processed")
         return "ok"
     except Exception as e:
         conn.rollback()
+        log.error(f"mark_pre_assessment_processed error: {e}")
         return f"error: {e}"
     finally:
         conn.close()
@@ -452,6 +475,7 @@ def fetch_raw_course_session(user_id: str, session_id: str) -> str:
     Returns {} if no unprocessed rows found.
     Returns { "status": "error", "detail": "..." } on failure.
     """
+    log.info(f"Fetching raw course session for user={user_id}, session={session_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -576,7 +600,7 @@ def compute_course_activity_summary(session_json: str) -> str:
       "topics_covered":        [str],
       "ide_exercises": [
         {
-          "exercise_id":          str,
+          "exercise_d":          str,
           "attempts":             int,
           "final_score":          int | null,
           "test_cases_passed":    int | null,
@@ -591,9 +615,11 @@ def compute_course_activity_summary(session_json: str) -> str:
 
     Returns { "status": "error", "detail": "..." } on failure.
     """
+    log.info("Computing course activity summary")
     try:
         session = json.loads(session_json)
     except Exception as e:
+        log.error(f"Invalid JSON in compute_course_activity_summary: {e}")
         return json.dumps({"status": "error", "detail": f"Invalid JSON: {e}"})
 
     try:
@@ -696,6 +722,7 @@ def compute_course_activity_summary(session_json: str) -> str:
         # ── Completion percentage ─────────────────────────────────────────
         completion_percentage = events.get("final_completion_percent", 0.0)
 
+        log.info(f"Successfully computed course activity: course={course_id}, topics={len(seen_topics)}, exercises={len(ide_exercises)}")
         return json.dumps({
             "course_id":             course_id,
             "session_id":            session_id,
@@ -775,6 +802,7 @@ def fetch_raw_mentor_chat(user_id: str, session_id: str) -> str:
     Returns {} if no unprocessed rows found.
     Returns { "status": "error", "detail": "..." } on failure.
     """
+    log.info(f"Fetching raw mentor chat for user={user_id}, session={session_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -848,9 +876,11 @@ def compute_mentor_chat_summary(session_json: str) -> str:
 
     Returns { "status": "error", "detail": "..." } on failure.
     """
+    log.info("Computing mentor chat summary")
     try:
         session = json.loads(session_json)
     except Exception as e:
+        log.error(f"Invalid JSON in compute_mentor_chat_summary: {e}")
         return json.dumps({"status": "error", "detail": f"Invalid JSON: {e}"})
 
     try:
@@ -892,6 +922,7 @@ def compute_mentor_chat_summary(session_json: str) -> str:
                 seen_set.add(t)
                 seen_topics.append(t)
 
+        log.info(f"Successfully computed mentor chat summary: turns={turn_count}, topics={len(seen_topics)}, duration={duration_minutes}min")
         return json.dumps({
             "session_id":        session_id,
             "course_id":         course_id,
@@ -952,6 +983,7 @@ def fetch_raw_course_completion(user_id: str, course_id: str) -> str:
     Returns completion record + all session history for areas_of_struggle/strength computation.
     Returns {} if no unprocessed completion found.
     """
+    log.info(f"Fetching raw course completion for user={user_id}, course={course_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -964,6 +996,7 @@ def fetch_raw_course_completion(user_id: str, course_id: str) -> str:
             """, (user_id, course_id))
             completion = cur.fetchone()
             if not completion:
+                log.debug(f"No unprocessed course completion found for user={user_id}, course={course_id}")
                 return json.dumps({})
             
             # Get all session data for this course
@@ -1001,6 +1034,7 @@ def fetch_raw_course_completion(user_id: str, course_id: str) -> str:
                     "created_at": s["created_at"].isoformat()
                 })
             
+            log.info(f"Successfully fetched course completion: user={user_id}, course={course_id}, sessions={len(sessions)}")
             return json.dumps(result)
     finally:
         conn.close()
@@ -1014,6 +1048,7 @@ def compute_course_completed_summary(course_data_json: str) -> str:
              areas_of_struggle (topic_ids where score < 70 or attempts > 3),
              areas_of_strength (topic_ids where score > 85 on first attempt).
     """
+    log.info("Computing course completed summary")
     try:
         data = json.loads(course_data_json)
         sessions = data.get("session_events", [])
@@ -1093,6 +1128,8 @@ def compute_course_completed_summary(course_data_json: str) -> str:
             "areas_of_struggle": areas_of_struggle,
             "areas_of_strength": areas_of_strength
         })
+        log.info(f"Successfully computed course completed summary: sessions={len(session_ids)}, avg_score={avg_exercise_score}")
+        return result
     
     except Exception as e:
         log.error("compute_course_completed_summary error: %s", e)
@@ -1136,6 +1173,7 @@ def fetch_raw_code_review(user_id: str, capstone_id: str, attempt_id: str) -> st
     Returns review_output JSON with issues, scores, tech evaluations.
     Returns {} if no unprocessed review found.
     """
+    log.info(f"Fetching raw code review for user={user_id}, capstone={capstone_id}, attempt={attempt_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1149,10 +1187,12 @@ def fetch_raw_code_review(user_id: str, capstone_id: str, attempt_id: str) -> st
             """, (user_id, capstone_id, attempt_id))
             row = cur.fetchone()
             if not row:
+                log.debug(f"No unprocessed code review found for user={user_id}, capstone={capstone_id}")
                 return json.dumps({})
             
             result = dict(row)
             result["created_at"] = result["created_at"].isoformat()
+            log.info(f"Successfully fetched code review for user={user_id}, capstone={capstone_id}")
             return json.dumps(result)
     finally:
         conn.close()
@@ -1165,6 +1205,7 @@ def compute_code_review_summary(review_json: str) -> str:
     Returns: capstone_id, submission_id, timeline_adherence, overall_issues_critical,
              overall_issues_minor, overall_verdict, tech_evaluations.
     """
+    log.info("Computing code review summary")
     try:
         data = json.loads(review_json)
         review_output = data.get("review_output", {})
@@ -1248,6 +1289,8 @@ def compute_code_review_summary(review_json: str) -> str:
             "overall_verdict": overall_verdict,
             "tech_evaluations": tech_evaluations
         })
+        log.info(f"Successfully computed code review summary: verdict={overall_verdict}, critical={critical_count}, minor={minor_count}")
+        return result
     
     except Exception as e:
         log.error("compute_code_review_summary error: %s", e)
@@ -1292,6 +1335,7 @@ def fetch_raw_test_review(user_id: str, capstone_id: str, attempt_id: str) -> st
     Returns test_output JSON with test_results array, coverage.
     Returns {} if no unprocessed review found.
     """
+    log.info(f"Fetching raw test review for user={user_id}, capstone={capstone_id}, attempt={attempt_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1305,10 +1349,12 @@ def fetch_raw_test_review(user_id: str, capstone_id: str, attempt_id: str) -> st
             """, (user_id, capstone_id, attempt_id))
             row = cur.fetchone()
             if not row:
+                log.debug(f"No unprocessed test review found for user={user_id}, capstone={capstone_id}")
                 return json.dumps({})
             
             result = dict(row)
             result["created_at"] = result["created_at"].isoformat()
+            log.info(f"Successfully fetched test review for user={user_id}, capstone={capstone_id}")
             return json.dumps(result)
     finally:
         conn.close()
@@ -1321,6 +1367,7 @@ def compute_test_run_summary(test_json: str) -> str:
     Returns: capstone_id, submission_id, timeline_adherence, tests_passed,
              tests_total, coverage_percent, failed_test_ids, agent_verdict.
     """
+    log.info("Computing test run summary")
     try:
         data = json.loads(test_json)
         test_output = data.get("test_output", {})
@@ -1356,6 +1403,8 @@ def compute_test_run_summary(test_json: str) -> str:
             "failed_test_ids": failed_test_ids,
             "agent_verdict": agent_verdict
         })
+        log.info(f"Successfully computed test run summary: passed={tests_passed}/{tests_total}, verdict={agent_verdict}")
+        return result
     
     except Exception as e:
         log.error("compute_test_run_summary error: %s", e)
@@ -1400,6 +1449,7 @@ def fetch_raw_viva(user_id: str, capstone_id: str, attempt_id: str) -> str:
     Returns array of turns with role, message, turn_number.
     Returns {} if no unprocessed turns found.
     """
+    log.info(f"Fetching raw viva turns for user={user_id}, capstone={capstone_id}, attempt={attempt_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1412,6 +1462,7 @@ def fetch_raw_viva(user_id: str, capstone_id: str, attempt_id: str) -> str:
             """, (user_id, capstone_id, attempt_id))
             count_row = cur.fetchone()
             if not count_row or count_row["cnt"] == 0:
+                log.debug(f"No unprocessed viva turns found for user={user_id}, capstone={capstone_id}")
                 return json.dumps({})
             
             # Fetch all turns
@@ -1444,6 +1495,7 @@ def fetch_raw_viva(user_id: str, capstone_id: str, attempt_id: str) -> str:
                     "created_at": turn["created_at"].isoformat()
                 })
             
+            log.info(f"Successfully fetched viva turns: user={user_id}, capstone={capstone_id}, turns={len(turns)}")
             return json.dumps(result)
     finally:
         conn.close()
@@ -1456,6 +1508,7 @@ def compute_viva_summary(viva_json: str) -> str:
     Returns: capstone_id, viva_session_id, timeline_adherence, questions_asked, duration_minutes.
     Agent will analyze turns for weak/strong areas and compute answers_satisfactory.
     """
+    log.info("Computing viva summary")
     try:
         data = json.loads(viva_json)
         turns = data.get("turns", [])
@@ -1479,6 +1532,8 @@ def compute_viva_summary(viva_json: str) -> str:
             "duration_minutes": duration_minutes,
             "turn_count": len(turns)
         })
+        log.info(f"Successfully computed viva summary: questions={questions_asked}, duration={duration_minutes}min, turns={len(turns)}")
+        return result
     
     except Exception as e:
         log.error("compute_viva_summary error: %s", e)
@@ -1533,6 +1588,7 @@ def fetch_unprocessed_semantic_trigger(user_id: str) -> str:
     Fetch the oldest unprocessed semantic rebuild trigger for a user.
     Returns {} if no unprocessed triggers exist.
     """
+    log.info(f"Fetching unprocessed semantic trigger for user={user_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1546,12 +1602,14 @@ def fetch_unprocessed_semantic_trigger(user_id: str) -> str:
             """, (user_id,))
             row = cur.fetchone()
             if not row:
+                log.debug(f"No unprocessed semantic trigger found for user={user_id}")
                 return json.dumps({})
             result = dict(row)
             result["triggered_at"] = result["triggered_at"].isoformat()
             # Ensure source_episode_id is always a string (empty string if NULL)
             if result["source_episode_id"] is None:
                 result["source_episode_id"] = ""
+            log.info(f"Successfully fetched semantic trigger for user={user_id}: reason={result['trigger_reason']}")
             return json.dumps(result)
     finally:
         conn.close()
@@ -1565,6 +1623,7 @@ def fetch_recent_episodes(user_id: str, since_timestamp: str, limit: int) -> str
     If since_timestamp is empty, fetches all episodes (first profile build).
     Returns array of episodes with type and data fields.
     """
+    log.info(f"Fetching recent episodes for user={user_id}, since={since_timestamp or 'all'}, limit={limit}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1595,6 +1654,7 @@ def fetch_recent_episodes(user_id: str, since_timestamp: str, limit: int) -> str
                     "timestamp": r["timestamp"].isoformat(),
                     "data": r["data"]
                 })
+            log.info(f"Successfully fetched {len(episodes)} episodes for user={user_id}")
             return json.dumps({"user_id": user_id, "episodes": episodes})
     finally:
         conn.close()
@@ -1607,6 +1667,7 @@ def fetch_current_semantic_profile(user_id: str) -> str:
     Returns the profile JSONB directly, plus metadata (version, is_new, last_updated).
     For new users, returns empty template with is_new=true.
     """
+    log.info(f"Fetching current semantic profile for user={user_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1650,6 +1711,7 @@ def fetch_current_semantic_profile(user_id: str) -> str:
                         "motivation_signals": "new learner"
                     }
                 }
+                log.info(f"No existing semantic profile found for user={user_id}, returning empty template")
                 return json.dumps({
                     "profile": empty_profile,
                     "version": 0,
@@ -1661,6 +1723,7 @@ def fetch_current_semantic_profile(user_id: str) -> str:
             profile_data = row["profile"]
             last_updated = profile_data.get("last_updated") if profile_data else None
             
+            log.info(f"Successfully fetched semantic profile for user={user_id}, version={row['version']}")
             return json.dumps({
                 "profile": profile_data,
                 "version": row["version"],
@@ -1678,6 +1741,7 @@ def compute_semantic_profile_update(episodes_json: str, current_profile_json: st
     Takes episodes array and current profile, returns updated profile structure.
     Deterministic aggregations only — agent handles LLM reasoning tasks.
     """
+    log.info("Computing semantic profile update")
     try:
         episodes_data = json.loads(episodes_json)
         current_profile = json.loads(current_profile_json)
@@ -2001,6 +2065,7 @@ def compute_semantic_profile_update(episodes_json: str, current_profile_json: st
             }
         }
         
+        log.info(f"Successfully computed semantic profile update: {len(episodes)} episodes, {len(known_struggles)} struggles, {len(known_strengths)} strengths")
         return json.dumps(updated_profile)
     
     except Exception as e:
@@ -2015,6 +2080,7 @@ def write_semantic_rebuild_trigger(user_id: str, trigger_reason: str, source_epi
     Idempotent: checks for duplicate trigger within 10-minute window.
     Returns trigger_id and status.
     """
+    log.info(f"Writing semantic rebuild trigger for user={user_id}, reason={trigger_reason}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2030,6 +2096,7 @@ def write_semantic_rebuild_trigger(user_id: str, trigger_reason: str, source_epi
             existing = cur.fetchone()
             
             if existing:
+                log.debug(f"Duplicate semantic trigger blocked for user={user_id}, reason={trigger_reason}")
                 return json.dumps({
                     "trigger_id": existing["id"],
                     "status": "ok",
@@ -2044,6 +2111,7 @@ def write_semantic_rebuild_trigger(user_id: str, trigger_reason: str, source_epi
             """, (trigger_id, user_id, trigger_reason, source_episode_id))
         
         conn.commit()
+        log.info(f"Successfully wrote semantic rebuild trigger: trigger_id={trigger_id}, user={user_id}")
         return json.dumps({"trigger_id": trigger_id, "status": "ok"})
     except Exception as e:
         conn.rollback()
@@ -2147,6 +2215,7 @@ def query_knowledge_gaps(user_id: str, domain: str) -> str:
     Returns topics with struggle signals, sorted by severity and recency.
     Useful for Pathway agent (avoid topics) and Mentor chatbot (proactive help).
     """
+    log.info(f"Querying knowledge gaps for user={user_id}, domain={domain}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2177,6 +2246,7 @@ def query_knowledge_gaps(user_id: str, domain: str) -> str:
                 if s.get("severity") in ["moderate", "high"]  # Filter out mild struggles
             ]
             
+            log.info(f"Successfully queried knowledge gaps for user={user_id}: {len(gaps)} gaps found")
             return json.dumps({"user_id": user_id, "domain": domain, "gaps": gaps})
     finally:
         conn.close()
@@ -2188,6 +2258,7 @@ def query_learning_velocity(user_id: str, time_period_days: int) -> str:
     Compute learning velocity: concepts mastered per time period.
     Returns count of topics added to known_strengths in the period and trend direction.
     """
+    log.info(f"Querying learning velocity for user={user_id}, time_period={time_period_days} days")
     conn = get_conn()
     try:
         from datetime import datetime as dt, timezone, timedelta
@@ -2227,6 +2298,7 @@ def query_learning_velocity(user_id: str, time_period_days: int) -> str:
             elif velocity < 0.5:
                 trend = "slowing"
             
+            log.info(f"Successfully computed learning velocity for user={user_id}: {recent_count} concepts, velocity={velocity:.2f}/week")
             return json.dumps({
                 "user_id": user_id,
                 "time_period_days": time_period_days,
@@ -2249,6 +2321,7 @@ def query_recommended_topics(user_id: str, domain: str) -> str:
     
     Returns array of recommended topic IDs with reasoning.
     """
+    log.info(f"Querying recommended topics for user={user_id}, domain={domain}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2304,6 +2377,7 @@ def query_recommended_topics(user_id: str, domain: str) -> str:
                         "priority": "medium"
                     })
             
+            log.info(f"Successfully queried recommended topics for user={user_id}: {len(recommendations)} recommendations")
             return json.dumps({
                 "user_id": user_id,
                 "domain": domain,
@@ -2321,6 +2395,7 @@ def get_mentor_personalization(user_id: str) -> str:
     Returns preferred_explanation_style, common_question_themes, 
     last_interaction_summary, motivation_signals.
     """
+    log.info(f"Getting mentor personalization for user={user_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2335,6 +2410,7 @@ def get_mentor_personalization(user_id: str) -> str:
             
             if not row:
                 # Return defaults for new users
+                log.debug(f"No semantic profile found for user={user_id}, returning defaults")
                 return json.dumps({
                     "user_id": user_id,
                     "preferred_explanation_style": "adaptive",
@@ -2346,6 +2422,7 @@ def get_mentor_personalization(user_id: str) -> str:
             profile = row["profile"]
             mentor_context = profile.get("mentor_context", {})
             
+            log.info(f"Successfully retrieved mentor personalization for user={user_id}")
             return json.dumps({
                 "user_id": user_id,
                 "preferred_explanation_style": mentor_context.get("preferred_explanation_style", "adaptive"),
@@ -2368,6 +2445,7 @@ def get_semantic_profile_slice(user_id: str, course_id: str = None) -> str:
     Returns mentor_context, performance_profile, known_struggles, known_strengths.
     Call at START of each new mentor session.
     """
+    log.info(f"Getting semantic profile slice for user={user_id}, course={course_id or 'all'}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2379,6 +2457,7 @@ def get_semantic_profile_slice(user_id: str, course_id: str = None) -> str:
             row = cur.fetchone()
             
             if not row:
+                log.debug(f"No semantic profile found for user={user_id}, returning empty defaults")
                 return json.dumps({
                     "user_id": user_id,
                     "mentor_context": {"preferred_explanation_style": "adaptive"},
@@ -2396,6 +2475,7 @@ def get_semantic_profile_slice(user_id: str, course_id: str = None) -> str:
                 struggles = [s for s in struggles if s.get("course_id") == course_id]
                 strengths = [s for s in strengths if s.get("course_id") == course_id]
             
+            log.info(f"Successfully retrieved semantic profile slice for user={user_id}: {len(struggles)} struggles, {len(strengths)} strengths")
             return json.dumps({
                 "user_id": user_id,
                 "mentor_context": profile.get("mentor_context", {}),
@@ -2414,6 +2494,7 @@ def get_skill_mastery(user_id: str, course_id: str = None) -> str:
     Returns effective_score (0.0-1.0) and confidence for each skill.
     Call at START of each mentor session.
     """
+    log.info(f"Getting skill mastery for user={user_id}, course={course_id or 'all'}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2434,6 +2515,7 @@ def get_skill_mastery(user_id: str, course_id: str = None) -> str:
             if course_id:
                 skills = [s for s in skills if s.get("course_id") == course_id]
             
+            log.info(f"Successfully retrieved skill mastery for user={user_id}: {len(skills)} skills")
             return json.dumps({
                 "user_id": user_id,
                 "course_id": course_id,
@@ -2449,6 +2531,7 @@ def get_lesson_content(lesson_id: str) -> str:
     Fetch full lesson content by ID.
     Call at START of mentor session so you can reference lesson material.
     """
+    log.info(f"Getting lesson content for lesson_id={lesson_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2458,11 +2541,13 @@ def get_lesson_content(lesson_id: str) -> str:
             lesson = cur.fetchone()
             
             if not lesson:
+                log.debug(f"Lesson {lesson_id} not found")
                 return json.dumps({
                     "success": False,
                     "error": f"Lesson {lesson_id} not found"
                 })
             
+            log.info(f"Successfully retrieved lesson content for lesson_id={lesson_id}")
             return json.dumps({
                 "success": True,
                 "lesson_id": lesson["lesson_id"],
@@ -2482,6 +2567,7 @@ def get_agent_decisions(user_id: str, agent_type: str = None, limit: int = 10) -
     Call ONLY when learner asks WHY a decision was made.
     agent_type: pathway_agent, semantic_rebuild_agent, code_review_agent, etc.
     """
+    log.info(f"Getting agent decisions for user={user_id}, agent_type={agent_type or 'all'}, limit={limit}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2502,6 +2588,7 @@ def get_agent_decisions(user_id: str, agent_type: str = None, limit: int = 10) -
             
             decisions = cur.fetchall()
             
+            log.info(f"Successfully retrieved {len(decisions)} agent decisions for user={user_id}")
             return json.dumps({
                 "user_id": user_id,
                 "agent_type": agent_type,
@@ -2524,6 +2611,7 @@ def persist_conversation_message(
     Call TWICE per turn: once for learner's message (role='user'),
     once for your response (role='mentor').
     """
+    log.info(f"Persisting conversation message: conversation_id={conversation_id}, role={role}")
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -2535,6 +2623,7 @@ def persist_conversation_message(
             """, (message_id, user_id, session_id, conversation_id, role, message))
             conn.commit()
             
+            log.info(f"Successfully persisted message: message_id={message_id}, role={role}")
             return json.dumps({
                 "status": "persisted",
                 "message_id": message_id,
@@ -2542,6 +2631,7 @@ def persist_conversation_message(
             })
     except Exception as e:
         conn.rollback()
+        log.error(f"persist_conversation_message error: {e}")
         return json.dumps({"status": "error", "error": str(e)})
     finally:
         conn.close()
@@ -2553,6 +2643,7 @@ def get_raw_session_transcript(session_id: str) -> str:
     Get complete User:/Mentor: transcript for a finished session.
     FOR EPISODIC EXTRACTION AGENT USE ONLY - not for mentor chatbot.
     """
+    log.info(f"Getting raw session transcript for session_id={session_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2565,6 +2656,7 @@ def get_raw_session_transcript(session_id: str) -> str:
             turns = cur.fetchall()
             
             if not turns:
+                log.debug(f"No transcript found for session_id={session_id}")
                 return json.dumps({
                     "session_id": session_id,
                     "transcript": "",
@@ -2578,6 +2670,7 @@ def get_raw_session_transcript(session_id: str) -> str:
             
             transcript = "\n".join(lines)
             
+            log.info(f"Successfully retrieved session transcript: session_id={session_id}, lines={len(lines)}")
             return json.dumps({
                 "session_id": session_id,
                 "transcript": transcript,
@@ -2593,6 +2686,7 @@ def get_current_course(user_id: str) -> str:
     Get the course the learner is currently studying.
     Returns course_id, title, current_lesson_id.
     """
+    log.info(f"Getting current course for user={user_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2607,11 +2701,13 @@ def get_current_course(user_id: str) -> str:
             course = cur.fetchone()
             
             if not course:
+                log.debug(f"No active course found for user={user_id}")
                 return json.dumps({
                     "success": False,
                     "error": "No active course found"
                 })
             
+            log.info(f"Successfully retrieved current course for user={user_id}: {course['course_id']}")
             return json.dumps({
                 "success": True,
                 "course_id": course["course_id"],
@@ -2628,6 +2724,7 @@ def get_recent_exercises(user_id: str, course_id: str = None, limit: int = 5) ->
     Get learner's recent exercise attempts with scores.
     Use to understand what they've been practicing recently.
     """
+    log.info(f"Getting recent exercises for user={user_id}, course={course_id or 'all'}, limit={limit}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2648,6 +2745,7 @@ def get_recent_exercises(user_id: str, course_id: str = None, limit: int = 5) ->
             
             exercises = cur.fetchall()
             
+            log.info(f"Successfully retrieved {len(exercises)} recent exercises for user={user_id}")
             return json.dumps({
                 "user_id": user_id,
                 "course_id": course_id,
@@ -2665,6 +2763,7 @@ def get_recent_exercises(user_id: str, course_id: str = None, limit: int = 5) ->
 def get_capstone_details(user_id: str) -> str:
     """Get the mega capstone requirements, description, and related context.
     Use this to understand what the user was supposed to build."""
+    log.info(f"Getting capstone details for user={user_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2690,12 +2789,14 @@ def get_capstone_details(user_id: str) -> str:
                 capstone = cur.fetchone()
             
             if not capstone:
+                log.debug(f"No mega capstone found for user={user_id}")
                 return json.dumps({
                     "success": False,
                     "error": "No mega capstone found for user",
                     "data": None
                 })
             
+            log.info(f"Successfully retrieved capstone details: {capstone['capstone_id']}")
             return json.dumps({
                 "success": True,
                 "error": None,
@@ -2714,6 +2815,7 @@ def get_capstone_details(user_id: str) -> str:
 def get_capstone_review(user_id: str, capstone_id: str = None) -> str:
     """Get the code review results for the user's mega capstone submission.
     Includes code quality, design patterns, strengths, and areas for improvement."""
+    log.info(f"Getting capstone review for user={user_id}, capstone={capstone_id or 'auto'}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2755,6 +2857,7 @@ def get_capstone_review(user_id: str, capstone_id: str = None) -> str:
             if isinstance(data, str):
                 data = json.loads(data)
             
+            log.info(f"Successfully retrieved capstone review for user={user_id}: {capstone_id}")
             return json.dumps({
                 "success": True,
                 "error": None,
@@ -2773,6 +2876,7 @@ def get_capstone_review(user_id: str, capstone_id: str = None) -> str:
 def get_capstone_test(user_id: str, capstone_id: str = None) -> str:
     """Get the test results for the user's mega capstone submission.
     Includes pass/fail status, individual test cases, and any failures."""
+    log.info(f"Getting capstone test results for user={user_id}, capstone={capstone_id or 'auto'}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2814,6 +2918,7 @@ def get_capstone_test(user_id: str, capstone_id: str = None) -> str:
             if isinstance(data, str):
                 data = json.loads(data)
             
+            log.info(f"Successfully retrieved capstone test results for user={user_id}: {capstone_id}")
             return json.dumps({
                 "success": True,
                 "error": None,
@@ -2833,6 +2938,7 @@ def start_viva(user_id: str, capstone_id: str, pathway_id: str = None) -> str:
     """Start a new viva session for a user.
     Must be called before recording questions and responses.
     Returns session_id and attempt_id needed for recording conversation turns."""
+    log.info(f"Starting viva session for user={user_id}, capstone={capstone_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2874,6 +2980,7 @@ def start_viva(user_id: str, capstone_id: str, pathway_id: str = None) -> str:
             session = cur.fetchone()
             conn.commit()
             
+            log.info(f"Successfully started viva session: session_id={session['session_id']}, attempt_id={attempt_id}")
             return json.dumps({
                 "success": True,
                 "error": None,
@@ -2889,6 +2996,7 @@ def start_viva(user_id: str, capstone_id: str, pathway_id: str = None) -> str:
             }, default=str)
     except Exception as e:
         conn.rollback()
+        log.error(f"start_viva error: {e}")
         return json.dumps({"success": False, "error": str(e), "data": None})
     finally:
         conn.close()
@@ -2897,6 +3005,7 @@ def start_viva(user_id: str, capstone_id: str, pathway_id: str = None) -> str:
 @mcp.tool()
 def get_viva_session(user_id: str, session_id: str) -> str:
     """Get the current state of a viva session including all conversation turns so far."""
+    log.info(f"Getting viva session: session_id={session_id}, user={user_id}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2907,6 +3016,7 @@ def get_viva_session(user_id: str, session_id: str) -> str:
             session = cur.fetchone()
             
             if not session:
+                log.debug(f"Viva session {session_id} not found")
                 return json.dumps({
                     "success": False,
                     "error": f"Viva session {session_id} not found",
@@ -2926,6 +3036,7 @@ def get_viva_session(user_id: str, session_id: str) -> str:
             """, (session_id,))
             turns = cur.fetchall()
             
+            log.info(f"Successfully retrieved viva session: session_id={session_id}, turns={len(turns)}")
             return json.dumps({
                 "success": True,
                 "error": None,
@@ -2972,6 +3083,7 @@ def record_viva_turn(
     context_source: (optional) For viva_agent questions: 'code_review', 'test_failure', 'design_pattern', 'requirement'
     understanding_signals: (optional) For user responses: dict with evaluation signals like {"clarity": "good", "depth": "moderate"}
     """
+    log.info(f"Recording viva turn: session={session_id}, turn={turn_number}, role={role}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2996,6 +3108,7 @@ def record_viva_turn(
             turn = cur.fetchone()
             conn.commit()
             
+            log.info(f"Successfully recorded viva turn: turn_id={turn['id']}, session={session_id}, turn={turn_number}")
             return json.dumps({
                 "success": True,
                 "error": None,
@@ -3013,6 +3126,7 @@ def record_viva_turn(
             }, default=str)
     except Exception as e:
         conn.rollback()
+        log.error(f"record_viva_turn error: {e}")
         return json.dumps({"success": False, "error": str(e), "data": None})
     finally:
         conn.close()
@@ -3030,6 +3144,7 @@ def complete_viva(
     result: 'pass' or 'fail'
     summary: Summary of the viva and reasoning for the decision
     """
+    log.info(f"Completing viva session: session_id={session_id}, user={user_id}, result={result}")
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -3101,6 +3216,7 @@ def complete_viva(
             episode = cur.fetchone()
             conn.commit()
             
+            log.info(f"Successfully completed viva: session_id={session_id}, episode_id={episode['episode_id']}, result={result}")
             return json.dumps({
                 "success": True,
                 "error": None,
@@ -3118,6 +3234,7 @@ def complete_viva(
             }, default=str)
     except Exception as e:
         conn.rollback()
+        log.error(f"complete_viva error: {e}")
         return json.dumps({"success": False, "error": str(e), "data": None})
     finally:
         conn.close()
