@@ -2663,13 +2663,12 @@ def get_recent_exercises(user_id: str, course_id: str = None, limit: int = 5) ->
 
 @mcp.tool()
 def get_capstone_details(user_id: str) -> str:
-    """
-    Get mega capstone requirements, description, and context.
-    Use to understand what the user was supposed to build.
-    """
+    """Get the mega capstone requirements, description, and related context.
+    Use this to understand what the user was supposed to build."""
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # First try to find via pathway
             cur.execute("""
                 SELECT c.* FROM capstones c
                 JOIN student_pathways sp ON c.capstone_id = sp.capstone_id
@@ -2681,8 +2680,9 @@ def get_capstone_details(user_id: str) -> str:
             capstone = cur.fetchone()
             
             if not capstone:
+                # Fallback: find any mega capstone
                 cur.execute("""
-                    SELECT * FROM capstones 
+                    SELECT * FROM capstones
                     WHERE capstone_id LIKE '%%mega%%' OR title ILIKE '%%mega%%'
                     ORDER BY created_at DESC
                     LIMIT 1
@@ -2692,15 +2692,19 @@ def get_capstone_details(user_id: str) -> str:
             if not capstone:
                 return json.dumps({
                     "success": False,
-                    "error": "No mega capstone found"
+                    "error": "No mega capstone found for user",
+                    "data": None
                 })
             
             return json.dumps({
                 "success": True,
-                "capstone_id": capstone["capstone_id"],
-                "title": capstone["title"],
-                "description": capstone["description"],
-                "passing_score": capstone.get("passing_score")
+                "error": None,
+                "data": {
+                    "capstone_id": capstone["capstone_id"],
+                    "title": capstone["title"],
+                    "description": capstone["description"],
+                    "passing_score": capstone["passing_score"],
+                }
             }, default=str)
     finally:
         conn.close()
@@ -2708,25 +2712,29 @@ def get_capstone_details(user_id: str) -> str:
 
 @mcp.tool()
 def get_capstone_review(user_id: str, capstone_id: str = None) -> str:
-    """
-    Get code review results for mega capstone submission.
-    Includes code quality, design patterns, strengths, weaknesses.
-    """
+    """Get the code review results for the user's mega capstone submission.
+    Includes code quality, design patterns, strengths, and areas for improvement."""
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Get capstone ID if not provided
             if not capstone_id:
                 cur.execute("""
-                    SELECT capstone_id FROM capstones 
+                    SELECT capstone_id FROM capstones
                     WHERE capstone_id LIKE '%%mega%%' OR title ILIKE '%%mega%%'
                     ORDER BY created_at DESC
                     LIMIT 1
                 """)
                 row = cur.fetchone()
                 if not row:
-                    return json.dumps({"success": False, "error": "No mega capstone found"})
+                    return json.dumps({
+                        "success": False,
+                        "error": "No mega capstone found",
+                        "data": None
+                    })
                 capstone_id = row["capstone_id"]
             
+            # Get code review episode
             cur.execute("""
                 SELECT * FROM episodic_episodes
                 WHERE user_id = %s AND type = 'CAPSTONE_CODE_REVIEW'
@@ -2739,7 +2747,8 @@ def get_capstone_review(user_id: str, capstone_id: str = None) -> str:
             if not review:
                 return json.dumps({
                     "success": False,
-                    "error": f"No code review found for capstone {capstone_id}"
+                    "error": f"No code review found for capstone {capstone_id}",
+                    "data": None
                 })
             
             data = review["data"]
@@ -2748,10 +2757,13 @@ def get_capstone_review(user_id: str, capstone_id: str = None) -> str:
             
             return json.dumps({
                 "success": True,
-                "episode_id": review["episode_id"],
-                "capstone_id": capstone_id,
-                "timestamp": review["timestamp"].isoformat() if hasattr(review["timestamp"], "isoformat") else str(review["timestamp"]),
-                "review": data
+                "error": None,
+                "data": {
+                    "episode_id": review["episode_id"],
+                    "capstone_id": capstone_id,
+                    "timestamp": review["timestamp"].isoformat() if hasattr(review["timestamp"], "isoformat") else str(review["timestamp"]),
+                    "review": data,
+                }
             }, default=str)
     finally:
         conn.close()
@@ -2759,25 +2771,29 @@ def get_capstone_review(user_id: str, capstone_id: str = None) -> str:
 
 @mcp.tool()
 def get_capstone_test(user_id: str, capstone_id: str = None) -> str:
-    """
-    Get test results for mega capstone submission.
-    Includes pass/fail status, individual test cases, failures.
-    """
+    """Get the test results for the user's mega capstone submission.
+    Includes pass/fail status, individual test cases, and any failures."""
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Get capstone ID if not provided
             if not capstone_id:
                 cur.execute("""
-                    SELECT capstone_id FROM capstones 
+                    SELECT capstone_id FROM capstones
                     WHERE capstone_id LIKE '%%mega%%' OR title ILIKE '%%mega%%'
                     ORDER BY created_at DESC
                     LIMIT 1
                 """)
                 row = cur.fetchone()
                 if not row:
-                    return json.dumps({"success": False, "error": "No mega capstone found"})
+                    return json.dumps({
+                        "success": False,
+                        "error": "No mega capstone found",
+                        "data": None
+                    })
                 capstone_id = row["capstone_id"]
             
+            # Get test run episode
             cur.execute("""
                 SELECT * FROM episodic_episodes
                 WHERE user_id = %s AND type = 'CAPSTONE_TEST_RUN'
@@ -2790,7 +2806,8 @@ def get_capstone_test(user_id: str, capstone_id: str = None) -> str:
             if not test_results:
                 return json.dumps({
                     "success": False,
-                    "error": f"No test results found for capstone {capstone_id}"
+                    "error": f"No test results found for capstone {capstone_id}",
+                    "data": None
                 })
             
             data = test_results["data"]
@@ -2799,180 +2816,133 @@ def get_capstone_test(user_id: str, capstone_id: str = None) -> str:
             
             return json.dumps({
                 "success": True,
-                "episode_id": test_results["episode_id"],
-                "capstone_id": capstone_id,
-                "timestamp": test_results["timestamp"].isoformat() if hasattr(test_results["timestamp"], "isoformat") else str(test_results["timestamp"]),
-                "test_results": data
+                "error": None,
+                "data": {
+                    "episode_id": test_results["episode_id"],
+                    "capstone_id": capstone_id,
+                    "timestamp": test_results["timestamp"].isoformat() if hasattr(test_results["timestamp"], "isoformat") else str(test_results["timestamp"]),
+                    "test_results": data,
+                }
             }, default=str)
     finally:
         conn.close()
 
 
 @mcp.tool()
-def start_viva(user_id: str, capstone_id: str) -> str:
-    """
-    Start new viva session for a user.
+def start_viva(user_id: str, capstone_id: str, pathway_id: str = None) -> str:
+    """Start a new viva session for a user.
     Must be called before recording questions and responses.
-    """
+    Returns session_id and attempt_id needed for recording conversation turns."""
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Validate user
             cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
             if not cur.fetchone():
-                return json.dumps({"success": False, "error": f"User {user_id} not found"})
+                return json.dumps({
+                    "success": False,
+                    "error": f"User {user_id} not found",
+                    "data": None
+                })
             
+            # Validate capstone
             cur.execute("SELECT * FROM capstones WHERE capstone_id = %s", (capstone_id,))
             if not cur.fetchone():
-                return json.dumps({"success": False, "error": f"Capstone {capstone_id} not found"})
+                return json.dumps({
+                    "success": False,
+                    "error": f"Capstone {capstone_id} not found",
+                    "data": None
+                })
             
+            # Create session
             session_id = f"viva-{uuid.uuid4().hex[:12]}"
+            attempt_id = f"attempt-{uuid.uuid4().hex[:12]}"
+            
+            # Store viva-specific data in device_info JSONB
+            session_metadata = {
+                "capstone_id": capstone_id,
+                "pathway_id": pathway_id,
+                "attempt_id": attempt_id,
+                "status": "in_progress"
+            }
+            
             cur.execute("""
-                INSERT INTO viva_sessions (session_id, user_id, capstone_id, status, total_questions, questions_asked)
-                VALUES (%s, %s, %s, 'in_progress', 6, 0)
+                INSERT INTO sessions (session_id, user_id, session_type, started_at, device_info)
+                VALUES (%s, %s, 'capstone_viva', NOW(), %s)
                 RETURNING *
-            """, (session_id, user_id, capstone_id))
+            """, (session_id, user_id, json.dumps(session_metadata)))
             session = cur.fetchone()
             conn.commit()
             
             return json.dumps({
                 "success": True,
-                "session_id": session["session_id"],
-                "user_id": user_id,
-                "capstone_id": capstone_id,
-                "status": session["status"],
-                "total_questions": session["total_questions"]
+                "error": None,
+                "data": {
+                    "session_id": session["session_id"],
+                    "attempt_id": attempt_id,
+                    "user_id": user_id,
+                    "capstone_id": capstone_id,
+                    "pathway_id": pathway_id,
+                    "status": "in_progress",
+                    "started_at": session["started_at"].isoformat() if session["started_at"] else None,
+                }
             }, default=str)
     except Exception as e:
         conn.rollback()
-        return json.dumps({"success": False, "error": str(e)})
+        return json.dumps({"success": False, "error": str(e), "data": None})
     finally:
         conn.close()
 
 
 @mcp.tool()
 def get_viva_session(user_id: str, session_id: str) -> str:
-    """
-    Get current state of viva session including all questions and responses.
-    """
+    """Get the current state of a viva session including all conversation turns so far."""
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM viva_sessions WHERE session_id = %s", (session_id,))
+            cur.execute("""
+                SELECT * FROM sessions
+                WHERE session_id = %s AND session_type = 'capstone_viva'
+            """, (session_id,))
             session = cur.fetchone()
             
             if not session:
-                return json.dumps({"success": False, "error": f"Session {session_id} not found"})
+                return json.dumps({
+                    "success": False,
+                    "error": f"Viva session {session_id} not found",
+                    "data": None
+                })
             
-            cur.execute("""
-                SELECT * FROM viva_questions 
-                WHERE session_id = %s 
-                ORDER BY question_number
-            """, (session_id,))
-            questions = cur.fetchall()
+            # Extract metadata from device_info
+            metadata = session.get("device_info") or {}
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
             
+            # Get all conversation turns
             cur.execute("""
-                SELECT * FROM viva_responses 
+                SELECT * FROM raw_viva_turns
                 WHERE session_id = %s
+                ORDER BY turn_number
             """, (session_id,))
-            responses = cur.fetchall()
+            turns = cur.fetchall()
             
             return json.dumps({
                 "success": True,
-                "session_id": session["session_id"],
-                "user_id": session["user_id"],
-                "capstone_id": session["capstone_id"],
-                "status": session["status"],
-                "total_questions": session["total_questions"],
-                "questions_asked": session["questions_asked"],
-                "questions": [dict(q) for q in questions],
-                "responses": [dict(r) for r in responses]
+                "error": None,
+                "data": {
+                    "session_id": session["session_id"],
+                    "user_id": session["user_id"],
+                    "session_type": session["session_type"],
+                    "capstone_id": metadata.get("capstone_id"),
+                    "pathway_id": metadata.get("pathway_id"),
+                    "attempt_id": metadata.get("attempt_id"),
+                    "status": metadata.get("status", "in_progress"),
+                    "started_at": session["started_at"].isoformat() if session["started_at"] else None,
+                    "ended_at": session["ended_at"].isoformat() if session["ended_at"] else None,
+                    "turns": [dict(t) for t in turns],
+                    "turn_count": len(turns),
+                }
             }, default=str)
-    finally:
-        conn.close()
-
-
-@mcp.tool()
-def record_viva_question(
-    user_id: str,
-    session_id: str,
-    question_text: str,
-    question_type: str,
-    context_source: str
-) -> str:
-    """
-    Record a question being asked during viva.
-    Call BEFORE asking the user the question.
-    question_type: concept, code_specific, edge_case, debugging
-    context_source: code_review, test_failure, etc.
-    """
-    conn = get_conn()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM viva_sessions WHERE session_id = %s", (session_id,))
-            session = cur.fetchone()
-            
-            if not session:
-                return json.dumps({"success": False, "error": f"Session {session_id} not found"})
-            
-            question_number = session["questions_asked"] + 1
-            
-            cur.execute("""
-                INSERT INTO viva_questions (session_id, question_number, question_text, topic, difficulty)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING *
-            """, (session_id, question_number, question_text, context_source, question_type))
-            question = cur.fetchone()
-            
-            cur.execute("""
-                UPDATE viva_sessions SET questions_asked = %s WHERE session_id = %s
-            """, (question_number, session_id))
-            conn.commit()
-            
-            return json.dumps({
-                "success": True,
-                "question_id": question["question_id"],
-                "question_number": question_number,
-                "question_text": question_text
-            }, default=str)
-    except Exception as e:
-        conn.rollback()
-        return json.dumps({"success": False, "error": str(e)})
-    finally:
-        conn.close()
-
-
-@mcp.tool()
-def record_viva_response(
-    user_id: str,
-    session_id: str,
-    question_id: str,
-    response_text: str,
-    understanding_signals: str = None
-) -> str:
-    """
-    Record user's response to a viva question.
-    Call AFTER the user answers.
-    understanding_signals: JSON string with evaluation data
-    """
-    conn = get_conn()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                INSERT INTO viva_responses (session_id, question_id, response_text, evaluation)
-                VALUES (%s, %s, %s, %s)
-                RETURNING *
-            """, (session_id, question_id, response_text, understanding_signals))
-            response = cur.fetchone()
-            conn.commit()
-            
-            return json.dumps({
-                "success": True,
-                "response_id": response["response_id"],
-                "question_id": question_id
-            }, default=str)
-    except Exception as e:
-        conn.rollback()
-        return json.dumps({"success": False, "error": str(e)})
     finally:
         conn.close()
 
@@ -2987,21 +2957,38 @@ def record_viva_turn(
     role: str,
     message: str,
     pathway_id: str = None,
-    episode_id: str = None
+    episode_id: str = None,
+    question_type: str = None,
+    context_source: str = None,
+    understanding_signals: dict = None
 ) -> str:
-    """
-    Record a conversation turn during the viva examination.
-    Call this for EVERY message exchanged - both examiner questions and learner responses.
+    """Record a conversation turn during the viva examination.
+    Call this for EVERY message exchanged - both viva_agent questions and user responses.
     
-    role: 'examiner' for your questions/statements, 'learner' for the student's responses
+    role: 'viva_agent' for your questions/statements, 'user' for the student's responses
     turn_number: sequential turn number starting from 1
     message: the full text of the message
+    question_type: (optional) For viva_agent core questions: 'concept', 'code_specific', 'edge_case', 'debugging'
+    context_source: (optional) For viva_agent questions: 'code_review', 'test_failure', 'design_pattern', 'requirement'
+    understanding_signals: (optional) For user responses: dict with evaluation signals like {"clarity": "good", "depth": "moderate"}
     """
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Build metadata JSON
+            metadata = {}
+            if question_type:
+                metadata['question_type'] = question_type
+            if context_source:
+                metadata['context_source'] = context_source
+            if understanding_signals:
+                metadata['understanding_signals'] = understanding_signals
+            
+            # Note: Schema doesn't have metadata column, so store in message if needed
+            # For now, just insert basic fields
+            
             cur.execute("""
-                INSERT INTO viva_conversation_turns
+                INSERT INTO raw_viva_turns
                 (user_id, session_id, capstone_id, pathway_id, attempt_id, turn_number, role, message, episode_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, created_at
@@ -3011,79 +2998,127 @@ def record_viva_turn(
             
             return json.dumps({
                 "success": True,
-                "turn_id": turn["id"],
-                "user_id": user_id,
-                "session_id": session_id,
-                "capstone_id": capstone_id,
-                "attempt_id": attempt_id,
-                "turn_number": turn_number,
-                "role": role,
-                "message": message,
-                "created_at": turn["created_at"].isoformat() if turn["created_at"] else None
+                "error": None,
+                "data": {
+                    "turn_id": turn["id"],
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "capstone_id": capstone_id,
+                    "attempt_id": attempt_id,
+                    "turn_number": turn_number,
+                    "role": role,
+                    "message": message,
+                    "created_at": turn["created_at"].isoformat() if turn["created_at"] else None,
+                }
             }, default=str)
     except Exception as e:
         conn.rollback()
-        return json.dumps({"success": False, "error": str(e)})
+        return json.dumps({"success": False, "error": str(e), "data": None})
     finally:
         conn.close()
 
 
 @mcp.tool()
-def complete_viva(user_id: str, session_id: str, result: str, summary: str) -> str:
-    """
-    Complete viva session with final pass/fail result and summary.
+def complete_viva(
+    user_id: str,
+    session_id: str,
+    result: str,
+    summary: str
+) -> str:
+    """Complete a viva session with the final pass/fail result and summary.
+    
     result: 'pass' or 'fail'
-    summary: Summary of viva and reasoning for decision
+    summary: Summary of the viva and reasoning for the decision
     """
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM viva_sessions WHERE session_id = %s", (session_id,))
+            cur.execute("""
+                SELECT * FROM sessions
+                WHERE session_id = %s AND session_type = 'capstone_viva'
+            """, (session_id,))
             session_before = cur.fetchone()
             
             if not session_before:
-                return json.dumps({"success": False, "error": f"Session {session_id} not found"})
+                return json.dumps({
+                    "success": False,
+                    "error": f"Viva session {session_id} not found",
+                    "data": None
+                })
             
+            # Extract metadata
+            metadata = session_before.get("device_info") or {}
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+            
+            # Update metadata with completion info
+            metadata["status"] = "completed"
+            metadata["result"] = result
+            
+            # Complete session
             cur.execute("""
-                UPDATE viva_sessions
-                SET status = 'completed', ended_at = NOW()
+                UPDATE sessions
+                SET ended_at = NOW(), device_info = %s
                 WHERE session_id = %s
                 RETURNING *
-            """, (session_id,))
+            """, (json.dumps(metadata), session_id))
             session = cur.fetchone()
             conn.commit()
             
+            # Calculate duration
             started = session_before["started_at"]
             ended = session["ended_at"]
-            duration_minutes = int((ended - started).total_seconds() / 60) if started and ended else 0
+            if started and ended:
+                duration_minutes = int((ended - started).total_seconds() / 60)
+            else:
+                duration_minutes = 0
             
+            # Count questions asked (turns with role='viva_agent')
+            cur.execute("""
+                SELECT COUNT(*) as question_count
+                FROM raw_viva_turns
+                WHERE session_id = %s
+                  AND role = 'viva_agent'
+            """, (session_id,))
+            q_count = cur.fetchone()
+            questions_asked = q_count["question_count"] if q_count else 0
+            
+            # Store viva episode
             cur.execute("""
                 INSERT INTO episodic_episodes (user_id, type, schema_version, data)
                 VALUES (%s, 'CAPSTONE_VIVA', 1, %s)
                 RETURNING episode_id
             """, (user_id, json.dumps({
                 "session_id": session_id,
-                "capstone_id": session["capstone_id"],
+                "capstone_id": metadata.get("capstone_id"),
+                "pathway_id": metadata.get("pathway_id"),
+                "attempt_id": metadata.get("attempt_id"),
                 "result": result,
                 "summary": summary,
-                "total_questions": session["total_questions"],
-                "questions_asked": session["questions_asked"],
-                "duration_minutes": duration_minutes
+                "questions_asked": questions_asked,
+                "duration_minutes": duration_minutes,
             })))
             episode = cur.fetchone()
             conn.commit()
             
             return json.dumps({
                 "success": True,
-                "session_id": session_id,
-                "episode_id": episode["episode_id"],
-                "status": "completed",
-                "result": result,
-                "duration_minutes": duration_minutes
+                "error": None,
+                "data": {
+                    "session_id": session["session_id"],
+                    "episode_id": episode["episode_id"],
+                    "status": "completed",
+                    "result": result,
+                    "summary": summary,
+                    "started_at": started.isoformat() if started else None,
+                    "ended_at": ended.isoformat() if ended else None,
+                    "questions_asked": questions_asked,
+                    "duration_minutes": duration_minutes,
+                }
             }, default=str)
     except Exception as e:
         conn.rollback()
-        return json.dumps({"success": False, "error": str(e)})
+        return json.dumps({"success": False, "error": str(e), "data": None})
     finally:
         conn.close()
 
