@@ -12,6 +12,7 @@ import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from openai import AzureOpenAI
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -19,9 +20,102 @@ log = logging.getLogger(__name__)
 
 mcp = FastMCP("neulearn-tools")
 
+# Azure OpenAI client for LLM reasoning in tools
+llm_client = AzureOpenAI(
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    api_version=os.getenv("AZURE_OPENAI_API_VERSION")
+)
+
 
 def get_conn():
     return psycopg2.connect(os.getenv("DATABASE_URL"))
+
+
+def _infer_semantic_fields_with_llm(profile: dict, episodes: list) -> dict:
+    """
+    Use LLM to infer learning_goal, preferred_explanation_style, and common_question_themes.
+    Internal helper for compute_semantic_profile_update.
+    """
+    try:
+        # Extract context for LLM
+        mentor_exchanges = profile.get("_agent_context", {}).get("mentor_exchanges", [])
+        declared_interests = profile.get("identity", {}).get("declared_interests", [])
+        current_learning_goal = profile.get("identity", {}).get("learning_goal")
+        current_explanation_style = profile.get("mentor_context", {}).get("preferred_explanation_style", "adaptive")
+        current_question_themes = profile.get("mentor_context", {}).get("common_question_themes", [])
+        
+        # Build prompt for LLM
+        prompt = f"""Analyze this learner's profile and infer missing semantic fields.
+
+**Declared Interests:** {', '.join(declared_interests) if declared_interests else 'None'}
+**Current Learning Goal:** {current_learning_goal or 'Not set'}
+**Mentor Exchanges (recent):** {len(mentor_exchanges)}
+{chr(10).join(f"- {ex}" for ex in mentor_exchanges[:5])}
+
+**Episodes Summary:**
+- Total episodes: {len(episodes)}
+- Types: {', '.join(set(ep['type'] for ep in episodes))}
+
+**Task:**
+1. **learning_goal** (only if currently None): Infer specific technical goal from episodes and exchanges (e.g., "build production RAG systems"). Return null if insufficient data.
+
+2. **preferred_explanation_style**: Analyze mentor exchanges. Return one of:
+   - "analogy_based": Uses analogies, metaphors
+   - "technical": Prefers precise specs, math, formulas
+   - "visual": Requests diagrams, visualizations
+   - "adaptive": Not enough data (need 5+ exchanges)
+
+3. **common_question_themes**: Extract top 3 recurring themes from exchanges (max 3). Examples: "architecture comparisons", "debugging strategies", "when to use what".
+
+**Output JSON only:**
+```json
+{{
+  "learning_goal": "inferred goal or null",
+  "preferred_explanation_style": "style",
+  "common_question_themes": ["theme1", "theme2", "theme3"]
+}}
+```"""
+        
+        response = llm_client.chat.completions.create(
+            model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            messages=[
+                {"role": "system", "content": "You are a learning analytics assistant. Output valid JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=300
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        
+        # Extract JSON from response (handle markdown code blocks)
+        if "```json" in result_text:
+            result_text = result_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in result_text:
+            result_text = result_text.split("```")[1].split("```")[0].strip()
+        
+        inferred = json.loads(result_text)
+        
+        # Apply inferences
+        result = {
+            "learning_goal": inferred.get("learning_goal") if not current_learning_goal else current_learning_goal,
+            "preferred_explanation_style": inferred.get("preferred_explanation_style", current_explanation_style),
+            "common_question_themes": inferred.get("common_question_themes", current_question_themes)
+        }
+        
+        log.info(f"LLM inferred semantic fields: {result}")
+        return result
+        
+    except Exception as e:
+        log.error(f"LLM inference error: {e}")
+        # Return safe defaults
+        return {
+            "learning_goal": current_learning_goal,
+            "preferred_explanation_style": current_explanation_style,
+            "common_question_themes": current_question_themes
+        }
+
 
 
 @mcp.tool()
@@ -1210,77 +1304,95 @@ def fetch_raw_code_review(user_id: str, capstone_id: str, attempt_id: str) -> st
 @mcp.tool()
 def compute_code_review_summary(review_json: str) -> str:
     """
-    Extract structured data from code review output for CAPSTONE_CODE_REVIEW episode.
-    Returns: capstone_id, submission_id, timeline_adherence, overall_issues_critical,
-             overall_issues_minor, overall_verdict, tech_evaluations.
+    Use LLM to extract structured tech evaluation data from code review output for CAPSTONE_CODE_REVIEW episode.
+    Returns tech evaluations with DESCRIPTIVE understanding, design, code_quality, test_coverage, verdict per technology.
     """
-    log.info("Computing code review summary")
+    log.info("Computing code review summary with LLM")
     try:
         data = json.loads(review_json)
         review_output = data.get("review_output", {})
+        
+        # Extract key data for LLM analysis
         issues = review_output.get("issues", [])
+        technology_breakdown = review_output.get("technology_breakdown", {})
+        
+        # Build prompt for LLM
+        prompt = f"""Analyze this capstone code review and write DESCRIPTIVE evaluations for each technology.
+
+**Overall Metrics:**
+- Files reviewed: {review_output.get('files_reviewed', 0)}
+- Score: {review_output.get('score', 0)}/100
+- Critical issues: {sum(1 for i in issues if i.get('severity') in ['critical', 'high'])}
+- Minor issues: {sum(1 for i in issues if i.get('severity') in ['medium', 'low'])}
+
+**Issues by Technology:**
+{json.dumps([{"technology": i.get("technology"), "severity": i.get("severity"), "category": i.get("category"), "comment": i.get("comment")[:150]} for i in issues[:15]], indent=2)}
+
+**Technology Breakdown (if available):**
+{json.dumps(technology_breakdown, indent=2) if technology_breakdown else "Not provided"}
+
+**CRITICAL: Write 2-3 sentence DESCRIPTIVE text for each field. DO NOT use single words or short labels.**
+
+For each technology mentioned in the issues, write:
+
+1. **understanding**: Describe what they understood well and what they missed. Mention specific concepts, patterns, or architectures.
+   Example: "Shows strong grasp of Django's MTV pattern with proper model-view separation and use of class-based views. However, demonstrates confusion about QuerySet lazy evaluation and N+1 query problems when fetching related objects."
+
+2. **design**: Describe architectural strengths and weaknesses. Be specific about design choices.
+   Example: "API follows RESTful conventions with proper resource naming and HTTP verb usage. Authentication flow is well-structured using JWT tokens. However, missing rate limiting middleware and no strategy for handling token refresh or revocation."
+
+3. **code_quality**: Describe implementation quality, patterns used, maintainability.
+   Example: "Code follows PEP-8 style guidelines and uses descriptive variable names. Good use of type hints for function signatures. However, many functions exceed 50 lines with mixed responsibilities, and error handling relies on bare except clauses that swallow specific exceptions."
+
+4. **test_coverage**: Describe what's tested and what's missing. Be specific about gaps.
+   Example: "Comprehensive unit tests for business logic with good use of fixtures and parametrized tests. However, integration tests only cover happy paths. Missing tests for authentication failures, database constraint violations, and edge cases like empty request bodies."
+
+5. **verdict**: pass OR needs_revision (just the label)
+
+Dont invent Any answers on your own. Evaluate only on the actual code review. 
+If data is not available you dont need to create your own data.
+
+**Output JSON only:**
+```json
+{{
+  "tech_evaluations": [
+    {{
+      "technology": "django",
+      "understanding": "Shows strong grasp of Django MTV pattern but confused about QuerySet lazy evaluation",
+      "design": "API follows REST conventions well but missing rate limiting strategy",
+      "code_quality": "Good PEP-8 compliance and type hints but functions too long with mixed responsibilities",
+      "test_coverage": "Comprehensive unit tests but integration tests only cover happy paths",
+      "verdict": "needs_revision"
+    }}
+  ]
+}}
+```"""
+        
+        response = llm_client.chat.completions.create(
+            model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            messages=[
+                {"role": "system", "content": "You are a senior code reviewer. Write detailed, descriptive evaluations (2-3 sentences per field). Output valid JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=2000
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        
+        # Extract JSON from response
+        if "```json" in result_text:
+            result_text = result_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in result_text:
+            result_text = result_text.split("```")[1].split("```")[0].strip()
+        
+        llm_result = json.loads(result_text)
         
         # Count issues by severity
-        critical_count = sum(1 for i in issues if i.get("severity") == "high")
+        critical_count = sum(1 for i in issues if i.get("severity") in ["critical", "high"])
         minor_count = sum(1 for i in issues if i.get("severity") in ["medium", "low"])
         
-        # Group issues by file/technology for tech_evaluations
-        tech_evaluations = []
-        file_techs = {}  # file_prefix -> tech_name mapping
-        for issue in issues:
-            file_path = issue.get("file", "")
-            if "langgraph" in file_path or "graph" in file_path:
-                tech = "langgraph"
-            elif "langchain" in file_path or "chain" in file_path:
-                tech = "langchain"
-            elif "retrieval" in file_path or "vector" in file_path or "embedding" in file_path:
-                tech = "vector_store"
-            else:
-                tech = "general"
-            
-            if tech not in file_techs:
-                file_techs[tech] = {"issues": [], "verdict": "pass"}
-            file_techs[tech]["issues"].append(issue)
-        
-        # Build tech_evaluations from grouped issues
-        for tech, tech_data in file_techs.items():
-            tech_issues = tech_data["issues"]
-            has_critical = any(i.get("severity") == "high" for i in tech_issues)
-            has_medium = any(i.get("severity") == "medium" for i in tech_issues)
-            
-            # Determine tech verdict
-            if has_critical or len([i for i in tech_issues if i.get("severity") in ["high", "medium"]]) > 2:
-                verdict = "needs_revision"
-            elif has_medium:
-                verdict = "needs_revision"
-            else:
-                verdict = "pass"
-            
-            # Build evaluation notes
-            understanding = "adequate"
-            design = "adequate"
-            code_quality = "adequate"
-            test_coverage = "needs_improvement" if has_critical else "adequate"
-            
-            for issue in tech_issues:
-                comment = issue.get("comment", "").lower()
-                if "exception" in comment or "error handling" in comment:
-                    code_quality = "needs_improvement"
-                if "test" in comment or "coverage" in comment:
-                    test_coverage = "poor"
-                if "design" in comment or "architecture" in comment:
-                    design = "needs_improvement"
-            
-            tech_evaluations.append({
-                "technology": tech,
-                "understanding": understanding,
-                "design": design,
-                "code_quality": code_quality,
-                "test_coverage": test_coverage,
-                "verdict": verdict
-            })
-        
-        # Overall verdict
+        # Determine overall verdict
         passed = review_output.get("passed", False)
         if critical_count > 0:
             overall_verdict = "needs_revision"
@@ -1289,20 +1401,21 @@ def compute_code_review_summary(review_json: str) -> str:
         else:
             overall_verdict = "fail"
         
-        return json.dumps({
+        result = {
             "capstone_id": data.get("capstone_id"),
             "submission_id": data.get("commit_sha"),
             "timeline_adherence": "on_time",
             "overall_issues_critical": critical_count,
             "overall_issues_minor": minor_count,
             "overall_verdict": overall_verdict,
-            "tech_evaluations": tech_evaluations
-        })
-        log.info(f"Successfully computed code review summary: verdict={overall_verdict}, critical={critical_count}, minor={minor_count}")
-        return result
+            "tech_evaluations": llm_result.get("tech_evaluations", [])
+        }
+        
+        log.info(f"LLM computed code review summary: verdict={overall_verdict}, tech_evals={len(result['tech_evaluations'])}")
+        return json.dumps(result)
     
     except Exception as e:
-        log.error("compute_code_review_summary error: %s", e)
+        log.error("compute_code_review_summary error: %s", e, exc_info=True)
         return json.dumps({"status": "error", "detail": str(e)})
 
 
@@ -1373,26 +1486,98 @@ def fetch_raw_test_review(user_id: str, capstone_id: str, attempt_id: str) -> st
 @mcp.tool()
 def compute_test_run_summary(test_json: str) -> str:
     """
-    Extract structured data from test output for CAPSTONE_TEST_RUN episode.
-    Returns: capstone_id, submission_id, timeline_adherence, tests_passed,
-             tests_total, coverage_percent, failed_test_ids, agent_verdict.
+    Use LLM to extract RICH structured data from test output for CAPSTONE_TEST_RUN episode.
+    Returns detailed analysis including failure patterns, coverage gaps, and verdict.
     """
-    log.info("Computing test run summary")
+    log.info("Computing test run summary with LLM")
     try:
         data = json.loads(test_json)
         test_output = data.get("test_output", {})
-        test_results = test_output.get("test_results", [])
         
+        test_results = test_output.get("test_results", [])
         tests_passed = test_output.get("passed", 0)
         tests_total = test_output.get("total_tests", 0)
         coverage_percent = test_output.get("coverage_percent", 0)
         
-        # Extract failed test IDs
-        failed_test_ids = [
-            t.get("test_name")
-            for t in test_results
-            if not t.get("passed", False)
-        ]
+        # Extract failed tests with details
+        failed_tests = [t for t in test_results if not t.get("passed", False)]
+        
+        # Build prompt for LLM
+        prompt = f"""Analyze this capstone test run and extract failure patterns and coverage insights.
+
+**Overall Metrics:**
+- Total tests: {tests_total}
+- Passed: {tests_passed}
+- Failed: {len(failed_tests)}
+- Coverage: {coverage_percent}%
+
+**Failed Tests:**
+{json.dumps([{"test_name": t.get("test_name"), "error": t.get("error_message")[:150]} for t in failed_tests[:10]], indent=2)}
+
+**Test Categories (if available):**
+{json.dumps(test_output.get("test_categories", {}), indent=2)}
+
+**Coverage by Component (if available):**
+{json.dumps(test_output.get("coverage_by_component", {}), indent=2)}
+
+**Task:** Analyze the test failures and extract:
+1. **failed_tests_detailed**: For each failed test, extract descriptive info about what failed and why
+2. **failure_analysis**: Group failures by common root causes or patterns
+3. **coverage_gaps**: Identify what's not being tested adequately
+
+Dont invent Any answers on your own. Evaluate only on the actual test Review.
+If data is not available you dont need to create your own data.
+
+**Output JSON only:**
+```json
+{{
+  "failed_tests_detailed": [
+    {{
+      "test_name": "test_user_authentication_expired_token",
+      "category": "integration",
+      "technology": "authentication",
+      "root_cause": "Token expiration check not implemented in middleware",
+      "impact": "Expired tokens accepted as valid, security vulnerability"
+    }}
+  ],
+  "failure_analysis": {{
+    "by_severity": {{
+      "critical": ["test_sql_injection_user_input"],
+      "high": ["test_password_reset_race_condition"]
+    }},
+    "by_technology": {{
+      "authentication": ["test_user_authentication_expired_token", "test_password_reset_race_condition"],
+      "database": ["test_sql_injection_user_input"]
+    }},
+    "common_root_causes": ["Input validation gaps", "Race condition in async handlers"]
+  }},
+  "coverage_gaps": [
+    "No tests for session timeout behavior",
+    "No tests for concurrent login attempts",
+    "No load tests for API rate limiting"
+  ]
+}}
+```"""
+        
+        response = llm_client.chat.completions.create(
+            model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            messages=[
+                {"role": "system", "content": "You are a test analysis expert. Output valid JSON only with failure patterns and coverage gaps."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=1500
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        
+        # Extract JSON from response
+        if "```json" in result_text:
+            result_text = result_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in result_text:
+            result_text = result_text.split("```")[1].split("```")[0].strip()
+        
+        llm_result = json.loads(result_text)
         
         # Determine verdict
         overall_passed = test_output.get("overall_passed", False)
@@ -1403,21 +1588,30 @@ def compute_test_run_summary(test_json: str) -> str:
         else:
             agent_verdict = "fail"
         
-        return json.dumps({
+        # Extract simple failed test IDs
+        failed_test_ids = [t.get("test_name") for t in failed_tests]
+        
+        result = {
             "capstone_id": data.get("capstone_id"),
             "submission_id": data.get("attempt_id"),
             "timeline_adherence": "on_time",
             "tests_passed": tests_passed,
             "tests_total": tests_total,
             "coverage_percent": coverage_percent,
+            "coverage_by_component": test_output.get("coverage_by_component", {}),
+            "test_categories": test_output.get("test_categories", {}),
             "failed_test_ids": failed_test_ids,
+            "failed_tests_detailed": llm_result.get("failed_tests_detailed", []),
+            "failure_analysis": llm_result.get("failure_analysis", {}),
+            "coverage_gaps": llm_result.get("coverage_gaps", []),
             "agent_verdict": agent_verdict
-        })
-        log.info(f"Successfully computed test run summary: passed={tests_passed}/{tests_total}, verdict={agent_verdict}")
-        return result
+        }
+        
+        log.info(f"LLM computed test run summary: passed={tests_passed}/{tests_total}, verdict={agent_verdict}, failed_count={len(failed_test_ids)}")
+        return json.dumps(result)
     
     except Exception as e:
-        log.error("compute_test_run_summary error: %s", e)
+        log.error("compute_test_run_summary error: %s", e, exc_info=True)
         return json.dumps({"status": "error", "detail": str(e)})
 
 
@@ -1516,11 +1710,11 @@ def fetch_raw_viva(user_id: str, capstone_id: str, attempt_id: str) -> str:
 @mcp.tool()
 def compute_viva_summary(viva_json: str) -> str:
     """
-    Compute deterministic fields for CAPSTONE_VIVA episode.
-    Returns: capstone_id, viva_session_id, timeline_adherence, questions_asked, duration_minutes.
-    Agent will analyze turns for weak/strong areas and compute answers_satisfactory.
+    Use LLM to compute FULL viva analysis for CAPSTONE_VIVA episode.
+    Returns: capstone_id, viva_session_id, timeline_adherence, questions_asked, duration_minutes,
+             answers_satisfactory, weak_areas_identified, strong_areas_identified, viva_score, agent_verdict.
     """
-    log.info("Computing viva summary")
+    log.info("Computing viva summary with LLM")
     try:
         data = json.loads(viva_json)
         turns = data.get("turns", [])
@@ -1536,19 +1730,110 @@ def compute_viva_summary(viva_json: str) -> str:
             last_ts = dt.fromisoformat(turns[-1]["created_at"].replace('Z', '+00:00'))
             duration_minutes = round((last_ts - first_ts).total_seconds() / 60, 1)
         
-        return json.dumps({
+        # Format Q&A pairs for LLM
+        qa_pairs = []
+        for i in range(len(turns) - 1):
+            if turns[i].get("role") == "viva_agent" and turns[i+1].get("role") == "user":
+                evaluator_feedback = ""
+                if i + 2 < len(turns) and turns[i+2].get("role") == "viva_agent":
+                    evaluator_feedback = turns[i+2].get("message", "")[:200]
+                
+                qa_pairs.append({
+                    "question": turns[i].get("message", ""),
+                    "answer": turns[i+1].get("message", ""),
+                    "evaluator_feedback": evaluator_feedback
+                })
+        
+        # Build prompt for LLM
+        prompt = f"""Analyze this capstone viva examination and assess the learner's performance.
+
+**Viva Metadata:**
+- Questions asked: {questions_asked}
+- Duration: {duration_minutes} minutes
+
+**Question-Answer Pairs:**
+{json.dumps(qa_pairs, indent=2)}
+
+**Task:** For each Q&A pair, analyze:
+1. **Is the answer satisfactory?** Look for:
+   - Solution-oriented language ("I would...", "The fix is...", "should use...")
+   - Correct technical reasoning
+   - Evaluator positive feedback ("Good", "Correct", "Well reasoned")
+   - Negative signals: "I don't know", vague answers, admission of weakness
+
+2. **Extract topics** for weak and strong areas. Be descriptive:
+   - Good: "error handling in tool nodes with conditional edges to fallback"
+   - Bad: "error handling"
+
+Dont invent Any answers on your own. Evaluate only on the actual Viva transcript.
+If data is not available you dont need to create your own data.
+
+**Output JSON only:**
+Example output:
+```json
+{{
+  "answers_satisfactory": 6,
+  "weak_areas_identified": [
+    "webhook signature verification for third-party integrations",
+    "database transaction isolation levels and deadlock prevention"
+  ],
+  "strong_areas_identified": [
+    "RESTful API design with proper resource modeling and verb selection",
+    "authentication flow using JWT with refresh token rotation strategy",
+    "database indexing strategy for complex queries with JOIN operations",
+    "caching layer design using Redis with proper invalidation patterns"
+  ]
+}}
+```"""
+        
+        response = llm_client.chat.completions.create(
+            model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            messages=[
+                {"role": "system", "content": "You are a viva examiner assessor. Analyze answers objectively and extract descriptive topics. Output valid JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=1000
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        
+        # Extract JSON from response
+        if "```json" in result_text:
+            result_text = result_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in result_text:
+            result_text = result_text.split("```")[1].split("```")[0].strip()
+        
+        llm_result = json.loads(result_text)
+        
+        answers_satisfactory = llm_result.get("answers_satisfactory", 0)
+        weak_areas = llm_result.get("weak_areas_identified", [])
+        strong_areas = llm_result.get("strong_areas_identified", [])
+        
+        # Compute viva score
+        viva_score = round((answers_satisfactory / questions_asked * 100)) if questions_asked > 0 else 0
+        
+        # Determine verdict
+        agent_verdict = "pass" if viva_score >= 70 else "fail"
+        
+        result = {
             "capstone_id": data.get("capstone_id"),
             "viva_session_id": data.get("session_id"),
             "timeline_adherence": "on_time",
             "questions_asked": questions_asked,
             "duration_minutes": duration_minutes,
-            "turn_count": len(turns)
-        })
-        log.info(f"Successfully computed viva summary: questions={questions_asked}, duration={duration_minutes}min, turns={len(turns)}")
-        return result
+            "answers_satisfactory": answers_satisfactory,
+            "weak_areas_identified": weak_areas,
+            "strong_areas_identified": strong_areas,
+            "viva_score": viva_score,
+            "agent_verdict": agent_verdict
+        }
+        
+        log.info(f"LLM computed viva summary: questions={questions_asked}, satisfactory={answers_satisfactory}, score={viva_score}, verdict={agent_verdict}")
+        return json.dumps(result)
     
     except Exception as e:
-        log.error("compute_viva_summary error: %s", e)
+        log.error("compute_viva_summary error: %s", e, exc_info=True)
         return json.dumps({"status": "error", "detail": str(e)})
 
 
@@ -1748,14 +2033,117 @@ def fetch_current_semantic_profile(user_id: str) -> str:
         conn.close()
 
 
+def _analyze_learning_signals_with_llm(
+    session_hours: list,
+    session_weekdays: list,
+    topic_negative_signals: dict,
+    topic_positive_signals: dict,
+    total_episodes: int,
+    mentor_exchanges: list,
+    question_type_counts: dict
+) -> dict:
+    """
+    Helper: Use LLM to analyze all learning signals and infer:
+    - engagement_pattern
+    - known_struggles (with severity)
+    - known_strengths
+    - motivation_signals
+    - timeline_adherence
+    
+    Replaces ALL hardcoded business logic with LLM-based inference.
+    """
+    prompt = f"""Analyze this learner's behavioral signals and create a psychological profile.
+
+**Session Timing Data:**
+- Session hours (24hr): {session_hours[:50] if len(session_hours) > 50 else session_hours}
+- Session weekdays (0=Mon, 6=Sun): {session_weekdays[:50] if len(session_weekdays) > 50 else session_weekdays}
+- Total episodes: {total_episodes}
+
+**Topic Performance Signals:**
+Negative signals (struggles, low scores, many attempts, overconfidence):
+{json.dumps(dict(list(topic_negative_signals.items())[:10]), indent=2)}
+
+Positive signals (high scores, quick mastery, underconfidence showing hidden strength):
+{json.dumps(dict(list(topic_positive_signals.items())[:10]), indent=2)}
+
+**Mentor Interaction Context:**
+- Question types: {json.dumps(question_type_counts)}
+- Recent exchanges: {json.dumps(mentor_exchanges[:3], indent=2) if mentor_exchanges else "none"}
+
+**Your Task:**
+Analyze the data and output a JSON object with:
+
+1. **engagement_pattern**: Infer from session_hours and session_weekdays. Options: "morning_learner", "evening_learner", "weekend_learner", "late_night_learner", "varied", "sporadic"
+
+2. **known_struggles**: Array of topics where learner struggles. For each:
+   - "topic": topic name
+   - "severity": "high", "moderate", or "mild" (consider frequency, recency, type of signal)
+   - "last_seen": most recent timestamp string
+   Sort by severity then recency.
+
+3. **known_strengths**: Array of topics where learner excels:
+   - "topic": topic name  
+   - "last_evidenced": most recent timestamp string
+   Sort by recency.
+
+4. **motivation_signals**: String describing engagement quality. Examples: "consistent daily engagement", "sporadic bursts", "declining activity", "weekend warrior", "new learner"
+
+5. **timeline_adherence**: "excellent", "good", "falling_behind", "inconsistent", or "unknown"
+
+**CRITICAL:** Base severity on:
+- Signal frequency (more = worse, but context matters)
+- Recency (recent = more relevant)
+- Signal type (viva_weakness > low exercise score)
+- Improvement trajectory (if improving, lower severity)
+
+Do NOT use arbitrary thresholds. Use your judgment.
+
+Output ONLY valid JSON. No markdown, no explanation."""
+
+    try:
+        response = llm_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are an educational psychologist analyzing learner data. Output valid JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=2000
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        
+        # Extract JSON
+        if "```json" in result_text:
+            result_text = result_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in result_text:
+            result_text = result_text.split("```")[1].split("```")[0].strip()
+        
+        llm_result = json.loads(result_text)
+        
+        log.info(f"LLM analyzed learning signals: pattern={llm_result.get('engagement_pattern')}, struggles={len(llm_result.get('known_struggles', []))}")
+        return llm_result
+    
+    except Exception as e:
+        log.error(f"LLM analysis error: {e}")
+        # Fallback to minimal safe defaults
+        return {
+            "engagement_pattern": "varied",
+            "known_struggles": [],
+            "known_strengths": [],
+            "motivation_signals": "unknown",
+            "timeline_adherence": "unknown"
+        }
+
+
 @mcp.tool()
 def compute_semantic_profile_update(user_id: str) -> str:
     """
     Server-side computation of semantic profile updates from episodes.
-    Fetches current profile and all episodes internally, returns updated profile structure.
-    Deterministic aggregations only — agent handles LLM reasoning tasks.
+    Fetches current profile and all episodes, performs deterministic aggregations,
+    and uses LLM to infer semantic fields (learning_goal, explanation_style, question_themes).
     
-    Returns JSON with updated profile including _agent_context field for agent reasoning.
+    Returns complete enhanced profile ready for writing. No agent reasoning required.
     """
     log.info(f"Computing semantic profile update for user={user_id}")
     conn = get_conn()
@@ -1833,9 +2221,8 @@ def compute_semantic_profile_update(user_id: str) -> str:
         session_hours = []  # Hour of day for each session
         session_weekdays = []  # Day of week (0=Mon, 6=Sun)
         
-        topic_negative_signals = {}  # topic -> count of negative signals
-        topic_positive_signals = {}  # topic -> {count, last_seen}
-        topic_last_seen = {}  # topic -> timestamp for struggles
+        topic_negative_signals = {}  # topic -> list of negative signal objects
+        topic_positive_signals = {}  # topic -> list of positive signal objects
         
         declared_interests = set(current_profile.get("identity", {}).get("declared_interests", []))
         pathway_activity = {}  # interest -> episode count
@@ -1861,14 +2248,24 @@ def compute_semantic_profile_update(user_id: str) -> str:
                 calibration_delta = data.get("calibration_delta", {})
                 for domain, topics in calibration_delta.items():
                     for topic, delta in topics.items():
+                        # Collect signals for LLM (no hardcoded meaning)
+                        if topic not in topic_negative_signals:
+                            topic_negative_signals[topic] = []
+                        if topic not in topic_positive_signals:
+                            topic_positive_signals[topic] = []
+                        
                         if delta == "overconfident":
-                            topic_negative_signals[topic] = topic_negative_signals.get(topic, 0) + 1
-                            topic_last_seen[topic] = timestamp
+                            topic_negative_signals[topic].append({
+                                "delta": delta,
+                                "timestamp": timestamp,
+                                "type": "calibration"
+                            })
                         elif delta == "underconfident":
-                            if topic not in topic_positive_signals:
-                                topic_positive_signals[topic] = {"count": 0, "last_seen": timestamp}
-                            topic_positive_signals[topic]["count"] += 1
-                            topic_positive_signals[topic]["last_seen"] = timestamp
+                            topic_positive_signals[topic].append({
+                                "delta": delta,
+                                "timestamp": timestamp,
+                                "type": "calibration"
+                            })
             
             # COURSE_ACTIVITY
             elif ep_type == "COURSE_ACTIVITY":
@@ -1888,16 +2285,29 @@ def compute_semantic_profile_update(user_id: str) -> str:
                     if final_score is not None:
                         exercise_scores.append(final_score)
                         
-                        # Negative signal if score < 60%
-                        if final_score < 60 and topic:
-                            topic_negative_signals[topic] = topic_negative_signals.get(topic, 0) + 1
-                            topic_last_seen[topic] = timestamp
-                        # Positive signal if score > 85%
-                        elif final_score > 85 and topic:
-                            if topic not in topic_positive_signals:
-                                topic_positive_signals[topic] = {"count": 0, "last_seen": timestamp}
-                            topic_positive_signals[topic]["count"] += 1
-                            topic_positive_signals[topic]["last_seen"] = timestamp
+                        # Collect signals for LLM analysis (simple categorization, LLM determines severity)
+                        if topic:
+                            # Negative signal: low score or many attempts
+                            if final_score < 70 or (attempts and attempts > 2):
+                                if topic not in topic_negative_signals:
+                                    topic_negative_signals[topic] = []
+                                topic_negative_signals[topic].append({
+                                    "score": final_score,
+                                    "attempts": attempts,
+                                    "timestamp": timestamp,
+                                    "type": "exercise"
+                                })
+                            
+                            # Positive signal: high score with few attempts
+                            elif final_score > 80 and (not attempts or attempts <= 2):
+                                if topic not in topic_positive_signals:
+                                    topic_positive_signals[topic] = []  
+                                topic_positive_signals[topic].append({
+                                    "score": final_score,
+                                    "attempts": attempts,
+                                    "timestamp": timestamp,
+                                    "type": "exercise"
+                                })
                     
                     if attempts is not None:
                         exercise_attempts.append(attempts)
@@ -1967,9 +2377,29 @@ def compute_semantic_profile_update(user_id: str) -> str:
                     review_verdict = data.get("overall_verdict", data.get("code_review_verdict", "needs_revision"))
                     capstone_data[capstone_id]["code_review_verdict"] = review_verdict
                     
-                    # Extract tech verdicts if available
-                    tech_verdicts = data.get("tech_verdicts", {})
-                    capstone_data[capstone_id]["tech_verdicts"].update(tech_verdicts)
+                    # Extract tech verdicts from tech_evaluations (LLM output from compute_code_review_summary)
+                    tech_evaluations = data.get("tech_evaluations", [])
+                    for tech_eval in tech_evaluations:
+                        tech_name = tech_eval.get("technology", "")
+                        # Synthesize verdict from evaluations
+                        code_quality = tech_eval.get("code_quality", "")
+                        understanding = tech_eval.get("understanding", "")
+                        # Simple heuristic: if mentions "confusion", "missed", "weak" = needs_work, else ok
+                        combined = (code_quality + " " + understanding).lower()
+                        if any(word in combined for word in ["confusion", "missed", "weak", "poor", "inadequate"]):
+                            verdict = "needs_work"
+                        elif any(word in combined for word in ["strong", "solid", "good", "excellent", "demonstrates"]):
+                            verdict = "good"
+                        else:
+                            verdict = "adequate"
+                        
+                        if tech_name:
+                            # Ensure strings are safe for JSON
+                            capstone_data[capstone_id]["tech_verdicts"][tech_name] = {
+                                "verdict": verdict,
+                                "understanding": str(understanding[:100]).replace('"', "'"),
+                                "code_quality": str(code_quality[:100]).replace('"', "'")
+                            }
             
             elif ep_type == "CAPSTONE_TEST_RUN":
                 capstone_id = data.get("capstone_id")
@@ -2000,17 +2430,41 @@ def compute_semantic_profile_update(user_id: str) -> str:
                             "viva_verdict": None,
                             "viva_score": None
                         }
-                    viva_score = data.get("final_score", data.get("viva_score"))
-                    capstone_data[capstone_id]["viva_verdict"] = "pass" if viva_score and viva_score >= 70 else "fail"
+                    viva_score = data.get("viva_score")
+                    agent_verdict = data.get("agent_verdict", "fail")
+                    
+                    capstone_data[capstone_id]["viva_verdict"] = agent_verdict
                     capstone_data[capstone_id]["viva_score"] = viva_score
                     
-                    # Update status
-                    if viva_score and viva_score >= 70:
+                    # Update status based on viva pass/fail
+                    if agent_verdict == "pass":
                         capstone_data[capstone_id]["status"] = "passed"
                     else:
                         capstone_data[capstone_id]["status"] = "failed"
+                    
+                    # Extract weak areas as struggles (viva-level insight)
+                    weak_areas = data.get("weak_areas_identified", [])
+                    for area in weak_areas:
+                        if area not in topic_negative_signals:
+                            topic_negative_signals[area] = []
+                        topic_negative_signals[area].append({
+                            "timestamp": timestamp,
+                            "type": "viva_weakness",
+                            "source": "capstone_viva"
+                        })
+                    
+                    # Extract strong areas as strengths
+                    strong_areas = data.get("strong_areas_identified", [])
+                    for area in strong_areas:
+                        if area not in topic_positive_signals:
+                            topic_positive_signals[area] = []
+                        topic_positive_signals[area].append({
+                            "timestamp": timestamp,
+                            "type": "viva_strength",
+                            "source": "capstone_viva"
+                        })
         
-        # Compute aggregated metrics
+        # Compute aggregated metrics (no hardcoded inference)
         from datetime import datetime as dt, timezone
         
         # Performance profile
@@ -2018,72 +2472,58 @@ def compute_semantic_profile_update(user_id: str) -> str:
         avg_attempts = sum(exercise_attempts) / len(exercise_attempts) if exercise_attempts else None
         avg_session_duration = sum(session_durations) / len(session_durations) if session_durations else None
         
-        # Engagement pattern
-        engagement_pattern = "varied"
-        if session_hours:
-            morning_count = sum(1 for h in session_hours if 6 <= h < 12)
-            evening_count = sum(1 for h in session_hours if 18 <= h < 24)
-            total = len(session_hours)
+        # Extract recent activity (last 3 sessions)
+        recent_sessions = []
+        session_episodes = [ep for ep in episodes if ep["type"] in ["COURSE_ACTIVITY", "MENTOR_CHAT"]]
+        for ep in session_episodes[-3:]:
+            # Safely extract summary, avoiding JSON serialization issues
+            summary = "session"
+            if ep["type"] == "COURSE_ACTIVITY":
+                summary = ep["data"].get("course_id", "course_session")
+            elif ep["type"] == "MENTOR_CHAT":
+                summary = f"mentor_chat_{ep['data'].get('session_id', 'unknown')}"
             
-            if morning_count / total >= 0.6:
-                engagement_pattern = "morning_learner"
-            elif evening_count / total >= 0.6:
-                engagement_pattern = "evening_learner"
-            elif session_weekdays:
-                weekend_count = sum(1 for d in session_weekdays if d >= 5)
-                if weekend_count / len(session_weekdays) >= 0.5:
-                    engagement_pattern = "weekend_learner"
-        
-        # Timeline adherence (simplified - would need pathway progress data)
-        timeline_adherence = "good"  # Default - agent can refine
-        
-        # Known struggles with severity
-        known_struggles = []
-        now = dt.now(timezone.utc)
-        for topic, count in topic_negative_signals.items():
-            last_seen = topic_last_seen.get(topic)
-            
-            # Determine severity
-            severity = "mild"
-            if count >= 3:
-                severity = "high"
-            elif count >= 2:
-                severity = "moderate"
-            
-            # Recency boost
-            if last_seen:
-                try:
-                    last_seen_dt = dt.fromisoformat(last_seen.replace('Z', '+00:00'))
-                    days_since = (now - last_seen_dt).days
-                    if days_since <= 30:
-                        # Boost severity
-                        if severity == "mild":
-                            severity = "moderate"
-                        elif severity == "moderate":
-                            severity = "high"
-                except:
-                    pass
-            
-            known_struggles.append({
-                "topic": topic,
-                "severity": severity,
-                "last_seen": last_seen
+            recent_sessions.append({
+                "type": ep["type"],
+                "timestamp": ep["timestamp"],
+                "summary": str(summary)  # Ensure string type
             })
         
-        # Sort by severity then recency
-        severity_order = {"high": 3, "moderate": 2, "mild": 1}
-        known_struggles.sort(key=lambda x: (severity_order.get(x["severity"], 0), x["last_seen"] or ""), reverse=True)
-        
-        # Known strengths
-        known_strengths = []
-        for topic, info in topic_positive_signals.items():
-            known_strengths.append({
-                "topic": topic,
-                "last_evidenced": info["last_seen"]
-            })
-        
-        # Sort by recency
-        known_strengths.sort(key=lambda x: x["last_evidenced"] or "", reverse=True)
+        # Query student_pathways for learning trajectory
+        learning_trajectory = None
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT pathway_id, interest, status, 
+                           courses_in_progress, courses_completed, courses_remaining,
+                           capstone_id
+                    FROM student_pathways
+                    WHERE user_id = %s AND status = 'active'
+                    LIMIT 1
+                """, (user_id,))
+                pathway_row = cur.fetchone()
+                if pathway_row:
+                    # Calculate progress metrics
+                    completed_count = len(pathway_row["courses_completed"]) if pathway_row["courses_completed"] else 0
+                    in_progress_count = len(pathway_row["courses_in_progress"]) if pathway_row["courses_in_progress"] else 0
+                    remaining_count = len(pathway_row["courses_remaining"]) if pathway_row["courses_remaining"] else 0
+                    total_courses = completed_count + in_progress_count + remaining_count
+                    progress_percent = round((completed_count / total_courses * 100)) if total_courses > 0 else 0
+                    
+                    learning_trajectory = {
+                        "pathway_id": pathway_row["pathway_id"],
+                        "interest": pathway_row["interest"],
+                        "status": pathway_row["status"],
+                        "current_courses": pathway_row["courses_in_progress"],
+                        "completed_courses": pathway_row["courses_completed"],
+                        "remaining_courses": pathway_row["courses_remaining"],
+                        "completed_count": completed_count,
+                        "total_courses": total_courses,
+                        "progress_percent": progress_percent,
+                        "capstone_id": pathway_row["capstone_id"]
+                    }
+        except Exception as e:
+            log.warning(f"Could not fetch learning_trajectory: {e}")
         
         # Primary focus (most active interest)
         primary_focus = None
@@ -2092,16 +2532,18 @@ def compute_semantic_profile_update(user_id: str) -> str:
         elif declared_interests:
             primary_focus = list(declared_interests)[0]
         
-        # Motivation signals
-        motivation_signals = "new learner"
-        if len(episodes) >= 10:
-            sessions_per_week = len(session_hours) / max(1, (len(episodes) / 7))  # Rough estimate
-            if sessions_per_week >= 5:
-                motivation_signals = "consistent daily engagement"
-            else:
-                motivation_signals = "periodic engagement"
+        # LLM INFERENCE: Analyze all signals to determine struggles, strengths, patterns
+        llm_analysis = _analyze_learning_signals_with_llm(
+            session_hours=session_hours,
+            session_weekdays=session_weekdays,
+            topic_negative_signals=topic_negative_signals,
+            topic_positive_signals=topic_positive_signals,
+            total_episodes=len(episodes),
+            mentor_exchanges=mentor_exchanges,
+            question_type_counts=question_type_counts
+        )
         
-        # Build updated profile
+        # Build updated profile (using LLM inferences, no hardcoded rules)
         updated_profile = {
             "user_id": current_profile.get("user_id"),
             "version": current_profile.get("version", 0),  # Will be incremented by write tool
@@ -2120,20 +2562,23 @@ def compute_semantic_profile_update(user_id: str) -> str:
             "performance_profile": {
                 "avg_exercise_score": round(avg_exercise_score, 1) if avg_exercise_score else None,
                 "avg_attempts_per_exercise": round(avg_attempts, 1) if avg_attempts else None,
-                "timeline_adherence": timeline_adherence,
-                "engagement_pattern": engagement_pattern,
+                "timeline_adherence": llm_analysis.get("timeline_adherence", "unknown"),
+                "engagement_pattern": llm_analysis.get("engagement_pattern", "varied"),
                 "avg_session_duration_minutes": round(avg_session_duration, 1) if avg_session_duration else None
             },
             
-            "known_struggles": known_struggles,
-            "known_strengths": known_strengths,
+            "known_struggles": llm_analysis.get("known_struggles", []),
+            "known_strengths": llm_analysis.get("known_strengths", []),
             "capstone_history": list(capstone_data.values()),
+            
+            "recent_activity": recent_sessions,
+            "learning_trajectory": learning_trajectory,
             
             "mentor_context": {
                 "preferred_explanation_style": current_profile.get("mentor_context", {}).get("preferred_explanation_style", "adaptive"),
                 "common_question_themes": current_profile.get("mentor_context", {}).get("common_question_themes", []),
                 "last_interaction_summary": mentor_exchanges[0] if mentor_exchanges else None,
-                "motivation_signals": motivation_signals
+                "motivation_signals": llm_analysis.get("motivation_signals", "new learner")
             },
             
             # Additional data for agent reasoning
@@ -2144,8 +2589,32 @@ def compute_semantic_profile_update(user_id: str) -> str:
             }
         }
         
-        log.info(f"Successfully computed semantic profile update: {len(episodes)} episodes, {len(known_struggles)} struggles, {len(known_strengths)} strengths")
-        return json.dumps(updated_profile)
+        # LLM REASONING: Infer semantic fields
+        llm_inferred = _infer_semantic_fields_with_llm(updated_profile, episodes)
+        
+        # Apply LLM inferences to profile
+        updated_profile["identity"]["learning_goal"] = llm_inferred["learning_goal"]
+        updated_profile["mentor_context"]["preferred_explanation_style"] = llm_inferred["preferred_explanation_style"]
+        updated_profile["mentor_context"]["common_question_themes"] = llm_inferred["common_question_themes"]
+        
+        # Remove _agent_context before returning (no longer needed)
+        updated_profile.pop("_agent_context", None)
+        
+        # Validate JSON serialization before returning
+        try:
+            profile_json = json.dumps(updated_profile)
+            # Test parse to catch any issues
+            json.loads(profile_json)
+        except Exception as json_err:
+            log.error(f"JSON serialization error in compute_semantic_profile_update: {json_err}")
+            log.error(f"Problematic profile keys: {list(updated_profile.keys())}")
+            # Return error
+            return json.dumps({"status": "error", "detail": f"JSON serialization failed: {str(json_err)}"})
+        
+        log.info(f"Successfully computed semantic profile update: {len(episodes)} episodes, "
+                 f"{len(llm_analysis.get('known_struggles', []))} struggles, "
+                 f"{len(llm_analysis.get('known_strengths', []))} strengths")
+        return profile_json
     
     except Exception as e:
         log.error(f"compute_semantic_profile_update error for user={user_id}: {e}")
@@ -2206,14 +2675,16 @@ def write_semantic_rebuild_trigger(user_id: str, trigger_reason: str, source_epi
 def write_semantic_profile_version(user_id: str, profile_json: str, trigger_reason: str, 
                                      source_episode_id: str) -> str:
     """
-    Write a new semantic profile version.
+    Write a new semantic profile version to semantic_profile_versions table.
     Atomically updates is_current flags and increments version number.
     Returns new version number and status.
     source_episode_id is for audit trail (pass empty string if not available).
     """
+    log.info(f"write_semantic_profile_version called: user={user_id}, trigger={trigger_reason}")
     conn = get_conn()
     try:
         profile = json.loads(profile_json)
+        log.info(f"Parsed profile JSON, keys: {list(profile.keys())}")
         
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             # Get current max version
@@ -2224,6 +2695,7 @@ def write_semantic_profile_version(user_id: str, profile_json: str, trigger_reas
             """, (user_id,))
             row = cur.fetchone()
             new_version = row["max_version"] + 1
+            log.info(f"Determined new version: {new_version}")
             
             # Update profile with new version and timestamp
             profile["version"] = new_version
@@ -2236,25 +2708,43 @@ def write_semantic_profile_version(user_id: str, profile_json: str, trigger_reas
                 SET    is_current = false
                 WHERE  user_id = %s
             """, (user_id,))
+            updated_count = cur.rowcount
+            log.info(f"Unmarked {updated_count} existing profiles as not current")
             
             # Insert new version
+            log.info(f"Inserting new version {new_version} into semantic_profile_versions")
             cur.execute("""
                 INSERT INTO semantic_profile_versions
                     (user_id, version, profile, trigger, created_at, is_current)
                 VALUES (%s, %s, %s, %s, now(), true)
             """, (user_id, new_version, json.dumps(profile), trigger_reason))
+            insert_count = cur.rowcount
+            log.info(f"INSERT completed, rowcount={insert_count}")
         
         conn.commit()
-        log.info("Semantic profile v%s created for user %s (trigger: %s)",
-                 new_version, user_id, trigger_reason)
+        log.info(f"✓ COMMITTED semantic profile v{new_version} for user {user_id} (trigger: {trigger_reason})")
+        
+        # Verify the insert
+        with conn.cursor() as verify_cur:
+            verify_cur.execute("""
+                SELECT version FROM semantic_profile_versions 
+                WHERE user_id = %s AND version = %s
+            """, (user_id, new_version))
+            verify_row = verify_cur.fetchone()
+            if verify_row:
+                log.info(f"✓ VERIFIED: Version {new_version} exists in database")
+            else:
+                log.error(f"✗ VERIFICATION FAILED: Version {new_version} NOT FOUND after commit!")
+        
         return json.dumps({"version": new_version, "status": "ok"})
     
     except Exception as e:
         conn.rollback()
-        log.error("write_semantic_profile_version error: %s", e)
+        log.error(f"✗ write_semantic_profile_version ERROR for user={user_id}: {e}", exc_info=True)
         return json.dumps({"status": "error", "detail": str(e)})
     finally:
         conn.close()
+        log.info(f"Connection closed for user={user_id}")
 
 
 @mcp.tool()
