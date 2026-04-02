@@ -43,6 +43,7 @@ def fetch_raw_self_assessment(user_id: str, session_id: str) -> str:
             if not row:
                 log.debug(f"No unprocessed self-assessment found for user={user_id}, session={session_id}")
                 return json.dumps({})
+            log.debug(f"SQL returned: {dict(row)}")
             result = dict(row)
             result["created_at"] = result["created_at"].isoformat()
             log.info(f"Successfully fetched self-assessment for user={user_id}")
@@ -71,6 +72,7 @@ def fetch_raw_pre_assessment(user_id: str, session_id: str) -> str:
             if not rows:
                 log.debug(f"No unprocessed pre-assessment found for user={user_id}, session={session_id}")
                 return json.dumps({})
+            log.debug(f"SQL returned {len(rows)} pre-assessment rows")
             result = {"user_id": user_id, "session_id": session_id,
                       "domains": {}, "row_ids": []}
             for r in rows:
@@ -492,8 +494,10 @@ def fetch_raw_course_session(user_id: str, session_id: str) -> str:
             rows = cur.fetchall()
 
         if not rows:
+            log.debug(f"No unprocessed course session found for user={user_id}, session={session_id}")
             return json.dumps({})
 
+        log.debug(f"SQL returned {len(rows)} course session events")
         course_id   = rows[0]["course_id"]
         row_ids     = []
         session_start_at = None
@@ -818,8 +822,10 @@ def fetch_raw_mentor_chat(user_id: str, session_id: str) -> str:
             rows = cur.fetchall()
 
         if not rows:
+            log.debug(f"No unprocessed mentor chat found for user={user_id}, session={session_id}")
             return json.dumps({})
 
+        log.debug(f"SQL returned {len(rows)} mentor chat turns")
         course_id   = rows[0]["course_id"]
         pathway_id  = rows[0]["pathway_id"]
         row_ids     = []
@@ -999,6 +1005,7 @@ def fetch_raw_course_completion(user_id: str, course_id: str) -> str:
                 log.debug(f"No unprocessed course completion found for user={user_id}, course={course_id}")
                 return json.dumps({})
             
+            log.debug(f"SQL returned completion: {dict(completion)}")
             # Get all session data for this course
             cur.execute("""
                 SELECT session_id, course_id, event_type, exercise_id,
@@ -1010,6 +1017,7 @@ def fetch_raw_course_completion(user_id: str, course_id: str) -> str:
             """, (user_id, course_id))
             sessions = cur.fetchall()
             
+            log.debug(f"SQL returned {len(sessions)} session events for course completion")
             result = {
                 "completion_id": completion["id"],
                 "user_id": completion["user_id"],
@@ -1190,6 +1198,7 @@ def fetch_raw_code_review(user_id: str, capstone_id: str, attempt_id: str) -> st
                 log.debug(f"No unprocessed code review found for user={user_id}, capstone={capstone_id}")
                 return json.dumps({})
             
+            log.debug(f"SQL returned code review: {dict(row)}")
             result = dict(row)
             result["created_at"] = result["created_at"].isoformat()
             log.info(f"Successfully fetched code review for user={user_id}, capstone={capstone_id}")
@@ -1352,6 +1361,7 @@ def fetch_raw_test_review(user_id: str, capstone_id: str, attempt_id: str) -> st
                 log.debug(f"No unprocessed test review found for user={user_id}, capstone={capstone_id}")
                 return json.dumps({})
             
+            log.debug(f"SQL returned test review: {dict(row)}")
             result = dict(row)
             result["created_at"] = result["created_at"].isoformat()
             log.info(f"Successfully fetched test review for user={user_id}, capstone={capstone_id}")
@@ -1465,6 +1475,7 @@ def fetch_raw_viva(user_id: str, capstone_id: str, attempt_id: str) -> str:
                 log.debug(f"No unprocessed viva turns found for user={user_id}, capstone={capstone_id}")
                 return json.dumps({})
             
+            log.debug(f"SQL found {count_row['cnt']} unprocessed viva turns")
             # Fetch all turns
             cur.execute("""
                 SELECT id, user_id, session_id, capstone_id, pathway_id, attempt_id,
@@ -1476,6 +1487,7 @@ def fetch_raw_viva(user_id: str, capstone_id: str, attempt_id: str) -> str:
             """, (user_id, capstone_id, attempt_id))
             turns = cur.fetchall()
             
+            log.debug(f"SQL returned {len(turns)} viva turns")
             result = {
                 "user_id": user_id,
                 "session_id": turns[0]["session_id"] if turns else None,
@@ -1604,6 +1616,7 @@ def fetch_unprocessed_semantic_trigger(user_id: str) -> str:
             if not row:
                 log.debug(f"No unprocessed semantic trigger found for user={user_id}")
                 return json.dumps({})
+            log.debug(f"SQL returned semantic trigger: {dict(row)}")
             result = dict(row)
             result["triggered_at"] = result["triggered_at"].isoformat()
             # Ensure source_episode_id is always a string (empty string if NULL)
@@ -1646,6 +1659,7 @@ def fetch_recent_episodes(user_id: str, since_timestamp: str, limit: int) -> str
                 """, (user_id, limit))
             
             rows = cur.fetchall()
+            log.debug(f"SQL returned {len(rows)} episodes")
             episodes = []
             for r in rows:
                 episodes.append({
@@ -1735,17 +1749,82 @@ def fetch_current_semantic_profile(user_id: str) -> str:
 
 
 @mcp.tool()
-def compute_semantic_profile_update(episodes_json: str, current_profile_json: str) -> str:
+def compute_semantic_profile_update(user_id: str) -> str:
     """
     Server-side computation of semantic profile updates from episodes.
-    Takes episodes array and current profile, returns updated profile structure.
+    Fetches current profile and all episodes internally, returns updated profile structure.
     Deterministic aggregations only — agent handles LLM reasoning tasks.
+    
+    Returns JSON with updated profile including _agent_context field for agent reasoning.
     """
-    log.info("Computing semantic profile update")
+    log.info(f"Computing semantic profile update for user={user_id}")
+    conn = get_conn()
     try:
-        episodes_data = json.loads(episodes_json)
-        current_profile = json.loads(current_profile_json)
-        episodes = episodes_data.get("episodes", [])
+        # Step 1: Fetch current profile
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT user_id, version, profile, trigger, created_at
+                FROM   semantic_profile_versions
+                WHERE  user_id = %s
+                  AND  is_current = true
+                LIMIT  1
+            """, (user_id,))
+            profile_row = cur.fetchone()
+            
+            if not profile_row:
+                # Create empty template for new users
+                current_profile = {
+                    "user_id": user_id,
+                    "version": 0,
+                    "last_updated": None,
+                    "last_updated_trigger": None,
+                    "identity": {
+                        "declared_interests": [],
+                        "primary_focus": None,
+                        "learning_goal": None
+                    },
+                    "skill_mastery_ref": user_id,
+                    "skill_note": "Skill levels live in user_skill_mastery — join on user_id at query time",
+                    "performance_profile": {
+                        "avg_exercise_score": None,
+                        "avg_attempts_per_exercise": None,
+                        "timeline_adherence": None,
+                        "engagement_pattern": None,
+                        "avg_session_duration_minutes": None
+                    },
+                    "known_struggles": [],
+                    "known_strengths": [],
+                    "capstone_history": [],
+                    "mentor_context": {
+                        "preferred_explanation_style": "adaptive",
+                        "common_question_themes": [],
+                        "last_interaction_summary": None,
+                        "motivation_signals": "new learner"
+                    }
+                }
+            else:
+                current_profile = profile_row["profile"]
+        
+        # Step 2: Fetch all episodes
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT episode_id, type, timestamp, data
+                FROM   episodic_episodes
+                WHERE  user_id = %s
+                ORDER  BY timestamp ASC
+                LIMIT  1000
+            """, (user_id,))
+            
+            rows = cur.fetchall()
+            log.info(f"Fetched {len(rows)} episodes for user={user_id}")
+            episodes = []
+            for r in rows:
+                episodes.append({
+                    "episode_id": r["episode_id"],
+                    "type": r["type"],
+                    "timestamp": r["timestamp"].isoformat(),
+                    "data": r["data"]
+                })
         
         # Initialize counters and accumulators
         exercise_scores = []
@@ -2069,8 +2148,10 @@ def compute_semantic_profile_update(episodes_json: str, current_profile_json: st
         return json.dumps(updated_profile)
     
     except Exception as e:
-        log.error("compute_semantic_profile_update error: %s", e)
+        log.error(f"compute_semantic_profile_update error for user={user_id}: {e}")
         return json.dumps({"status": "error", "detail": str(e)})
+    finally:
+        conn.close()
 
 
 @mcp.tool()
