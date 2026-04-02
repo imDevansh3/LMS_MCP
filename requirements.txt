@@ -2,4 +2,8 @@ fastmcp
 psycopg2-binary
 python-dotenv
 openai
+langchain-core
+langchain-openai
+langchain-mcp-adapters
+langgraph
 typing-extensions
