@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  mcp-server:
+    build: .
+    container_name: neulearn-mcp-server
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=postgresql://postgres:Kvrdevposdbqhsysadm@postgres.kivor-infra.svc.cluster.local:5432/neulearn
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}
+      - AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
+      - AZURE_OPENAI_API_VERSION=2025-01-01-preview
+      - MCP_PORT=8001
+      - MCP_HOST=0.0.0.0
+    restart: unless-stopped
+    networks:
+      - neulearn-network
+
+networks:
+  neulearn-network:
+    driver: bridge
