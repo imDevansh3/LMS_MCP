@@ -3382,57 +3382,24 @@ def log_mentor_chat_turn(
     """
     try:
         with DatabaseManager.get_cursor() as cursor:
-            # Check if raw_mentor_chat_turns table exists
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'raw_mentor_chat_turns'
-                )
-            """)
-            table_exists = cursor.fetchone()["exists"]
-            
-            if not table_exists:
-                # Create table if it doesn't exist
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS raw_mentor_chat_turns (
-                        turn_id         TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
-                        user_id         TEXT NOT NULL,
-                        session_id      TEXT NOT NULL,
-                        turn_number     INT NOT NULL,
-                        role            TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
-                        message         TEXT NOT NULL,
-                        course_id       TEXT,
-                        pathway_id      TEXT,
-                        topic_id        TEXT,
-                        timestamp       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        FOREIGN KEY (user_id) REFERENCES users(user_id)
-                    )
-                """)
-                cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_mentor_turns_session 
-                    ON raw_mentor_chat_turns(session_id, turn_number)
-                """)
-                logger.info("Created raw_mentor_chat_turns table")
-            
-            # Insert turn
-            turn_id = str(uuid.uuid4())
             cursor.execute("""
                 INSERT INTO raw_mentor_chat_turns
-                    (turn_id, user_id, session_id, turn_number, role, message,
-                     course_id, pathway_id, topic_id, timestamp)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-            """, (turn_id, user_id, session_id, turn_number, role, message,
+                    (user_id, session_id, turn_number, role, message,
+                     course_id, pathway_id, topic_id, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                RETURNING id
+            """, (user_id, session_id, turn_number, role, message,
                   course_id, pathway_id, topic_id))
-            
+            turn = cursor.fetchone()
+
             return {
                 "status": "success",
-                "turn_id": turn_id
+                "turn_id": turn["id"]
             }
-            
+
     except Exception as e:
         logger.error(f"Error logging mentor chat turn: {e}")
         return {"status": "error", "error": str(e)}
-
 
 # ─── Tool 6: Get Prerequisite Gaps ───────────────────────────────────────────
 
@@ -3440,7 +3407,7 @@ def get_prerequisite_gaps(user_id: str, current_topic_id: str) -> Dict[str, Any]
     """
     Identify prerequisite topics the user struggles with.
     
-    Note: This requires a prerequisite graph in FalkorDB or a 
+    Note: Thais requires a prerequisite graph in FalkorDB or a 
     topic_prerequisites table in Postgres. Stub implementation for now.
     """
     try:
