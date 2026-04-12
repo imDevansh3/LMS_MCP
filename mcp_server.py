@@ -239,6 +239,78 @@ def get_student_context(user_id: str, session_id: Optional[str] = None) -> str:
             """, {"course_id": current_course_id})
             course_name = falkor_result[0][0] if falkor_result else current_course_id
         
+        # Extract meaningful insights from semantic profile
+        learning_insights = None
+        if profile and profile.get("profile"):
+            prof_data = profile["profile"]
+            
+            # Extract identity insights
+            identity = prof_data.get("identity", {})
+            entry_assessment = identity.get("entry_assessment", {})
+            
+            # Extract skill insights from skill_map
+            skill_map = prof_data.get("skill_map", {})
+            subtracks = skill_map.get("subtracks", {})
+            
+            # Find strengths and struggles from modules
+            strengths = []
+            struggles = []
+            for subtrack_name, subtrack_data in subtracks.items():
+                modules = subtrack_data.get("modules", {})
+                for mod_id, mod_data in modules.items():
+                    if mod_data.get("mastery_score", 0) >= 0.7:
+                        strengths.append({
+                            "subtrack": subtrack_name,
+                            "module": mod_id,
+                            "mastery": mod_data.get("mastery_score"),
+                            "level": mod_data.get("assessed_level")
+                        })
+                    elif mod_data.get("mastery_score", 0) < 0.5:
+                        struggles.append({
+                            "subtrack": subtrack_name,
+                            "module": mod_id,
+                            "mastery": mod_data.get("mastery_score"),
+                            "struggle_areas": mod_data.get("areas_of_struggle", [])
+                        })
+            
+            # Extract learning disposition
+            learning_disp = prof_data.get("learning_disposition", {})
+            calibration = learning_disp.get("calibration_profile", {})
+            gaming = learning_disp.get("gaming_disposition", {})
+            persistence = learning_disp.get("persistence_profile", {})
+            
+            # Extract engagement shape
+            engagement = prof_data.get("engagement_shape", {})
+            
+            learning_insights = {
+                "entry_level": entry_assessment.get("assessed_entry_level"),
+                "calibration": {
+                    "status": entry_assessment.get("calibration_at_entry"),
+                    "trend": calibration.get("calibration_trend"),
+                    "note": calibration.get("note")
+                },
+                "skill_strengths": strengths[:5],  # Top 5 strengths
+                "skill_struggles": struggles[:5],  # Top 5 struggles
+                "learning_patterns": {
+                    "struggle_pattern": learning_disp.get("struggle_pattern"),
+                    "learning_velocity": learning_disp.get("learning_velocity"),
+                    "persistence": {
+                        "gives_up_pattern": persistence.get("gives_up_pattern"),
+                        "first_attempt_pass_rate": persistence.get("first_attempt_pass_rate"),
+                        "note": persistence.get("note")
+                    },
+                    "gaming_risk": gaming.get("risk_level"),
+                    "preferred_explanation_style": learning_disp.get("preferred_explanation_style")
+                },
+                "engagement": {
+                    "consistency": engagement.get("consistency_label"),
+                    "dropout_risk": engagement.get("dropout_risk_profile"),
+                    "sessions_per_week": engagement.get("sessions_per_week_avg"),
+                    "avg_session_duration_min": engagement.get("avg_session_duration_minutes")
+                },
+                "capstone_completed": len(prof_data.get("capstone_record", {}).get("completed", []))
+            }
+        
         # Build context
         context = {
             "user_id": user_id,
@@ -272,7 +344,7 @@ def get_student_context(user_id: str, session_id: Optional[str] = None) -> str:
                 }
                 for s in mastery_rows
             ],
-            "semantic_profile": profile["profile"] if profile else None,
+            "learning_insights": learning_insights,
         }
         
         return json.dumps({
