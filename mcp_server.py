@@ -59,6 +59,7 @@ if not all([DB_URL, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY]):
     raise ValueError("Missing required environment variables. Check .env file.")
 
 logger.info("Configuration loaded successfully")
+logger.info(f"FalkorDB config: host={FALKORDB_HOST}, port={FALKORDB_PORT}, graph={FALKORDB_GRAPH}")
 
 
 # =============================================================================
@@ -114,9 +115,19 @@ class FalkorManager:
     @classmethod
     def initialize(cls):
         if cls._graph is None:
-            client = FalkorDBClient(host=FALKORDB_HOST, port=FALKORDB_PORT)
-            cls._graph = client.select_graph(FALKORDB_GRAPH)
-            logger.info(f"FalkorDB connected: graph={FALKORDB_GRAPH} at {FALKORDB_HOST}:{FALKORDB_PORT}")
+            try:
+                logger.info(f"Attempting to connect to FalkorDB at {FALKORDB_HOST}:{FALKORDB_PORT}...")
+                client = FalkorDBClient(host=FALKORDB_HOST, port=FALKORDB_PORT)
+                cls._graph = client.select_graph(FALKORDB_GRAPH)
+                logger.info(f"✓ FalkorDB connected: graph={FALKORDB_GRAPH} at {FALKORDB_HOST}:{FALKORDB_PORT}")
+            except Exception as e:
+                logger.error(f"✗ Failed to connect to FalkorDB at {FALKORDB_HOST}:{FALKORDB_PORT}")
+                logger.error(f"Error: {type(e).__name__}: {e}")
+                logger.error("Please check:")
+                logger.error(f"  1. FALKORDB_HOST environment variable (current: {FALKORDB_HOST})")
+                logger.error(f"  2. FalkorDB service is running and accessible")
+                logger.error(f"  3. Network connectivity from this pod to FalkorDB service")
+                raise
 
     @classmethod
     def query(cls, cypher: str, params: dict = None) -> list:
